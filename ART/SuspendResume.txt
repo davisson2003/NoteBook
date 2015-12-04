@@ -368,10 +368,22 @@ WorkFlow:
      has been cleaned.
 
 ======================================================================================================
-At the thread Level, if thread is Runnable, it will use following method to achieve the state transit
-between Runnable and !Runnable.
+At the thread Level, one example to transit state is using SOA (ScopedObjectAccess). 
+When SOA instance generated, the thread transits to Runnable. and when SOA instance deleted, the thread transits back from Runnable. so the commonly use of SOA is like: 
+{
+  ScopedObjectAccess soa(thread);
+  // work in Runnable state.
+}
+// work in !Runnable state.
 
-================================= 
+For SOA, it actually use the ScopedThreadStateChange class instance to achieve the transition. see the define of class ScopedObjectAccessUnchecked in art/runtime/scoped_thread_stat_change.h
+
+--------------------------- ScopedThreadStateChange ---------------------------------------------
+<src art/runtime/scoped_thread_state_change.h>
+
+
+
+
 
 
 
