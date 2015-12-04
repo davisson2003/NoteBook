@@ -1,0 +1,377 @@
+In ART, thread state change is important. It assists the different thread like GC thread, 
+Debugger thread, mutator thread to finish there job. one example is the GC Pause phase.
+
+And here is some design and codes that related to thread state change in ART:
+
+Stautes of thread, the main classification is Runnable and others(!Runnable)
+statues list: <src art/runtime/thread_state.h>
+
+enum ThreadState {
+  //                                   Thread.State   JDWP state
+  kTerminated = 66,                 // TERMINATED     TS_ZOMBIE    Thread.run has returned, but Thread* still around
+  kRunnable,                        // RUNNABLE       TS_RUNNING   runnable
+  kTimedWaiting,                    // TIMED_WAITING  TS_WAIT      in Object.wait() with a timeout
+  kSleeping,                        // TIMED_WAITING  TS_SLEEPING  in Thread.sleep()
+  kBlocked,                         // BLOCKED        TS_MONITOR   blocked on a monitor
+  kWaiting,                         // WAITING        TS_WAIT      in Object.wait()
+  kWaitingForGcToComplete,          // WAITING        TS_WAIT      blocked waiting for GC
+  kWaitingForCheckPointsToRun,      // WAITING        TS_WAIT      GC waiting for checkpoints to run
+  kWaitingPerformingGc,             // WAITING        TS_WAIT      performing GC
+  kWaitingForDebuggerSend,          // WAITING        TS_WAIT      blocked waiting for events to be sent
+  kWaitingForDebuggerToAttach,      // WAITING        TS_WAIT      blocked waiting for debugger to attach
+  kWaitingInMainDebuggerLoop,       // WAITING        TS_WAIT      blocking/reading/processing debugger events
+  kWaitingForDebuggerSuspension,    // WAITING        TS_WAIT      waiting for debugger suspend all
+  kWaitingForJniOnLoad,             // WAITING        TS_WAIT      waiting for execution of dlopen and JNI on load code
+  kWaitingForSignalCatcherOutput,   // WAITING        TS_WAIT      waiting for signal catcher IO to complete
+  kWaitingInMainSignalCatcherLoop,  // WAITING        TS_WAIT      blocking/reading/processing signals
+  kWaitingForDeoptimization,        // WAITING        TS_WAIT      waiting for deoptimization suspend all
+  kWaitingForMethodTracingStart,    // WAITING        TS_WAIT      waiting for method tracing to start
+  kWaitingForVisitObjects,          // WAITING        TS_WAIT      waiting for visiting objects
+  kWaitingForGetObjectsAllocated,   // WAITING        TS_WAIT      waiting for getting the number of allocated objects
+  kWaitingWeakGcRootRead,           // WAITING        TS_WAIT      waiting on the GC to read a weak root
+  kWaitingForGcThreadFlip,          // WAITING        TS_WAIT      waiting on the GC thread flip (CC collector) to finish
+  kStarting,                        // NEW            TS_WAIT      native thread started, not yet ready to run managed code
+  kNative,                          // RUNNABLE       TS_RUNNING   running in a JNI native method
+  kSuspended,                       // RUNNABLE       TS_RUNNING   suspended by GC or debugger
+};
+std::ostream& operator<<(std::ostream& os, const ThreadState& rhs);
+====================
+
+From GC perspective, only the thread running in Runnable state can modify the Heap. that is why CMS must have STW phase. Here is how ART implement SuspendAll / ResumeAll 
+
+================================================ SuspendAll =====================================================
+<src art/runtime/thread_list.cc>
+
+void ThreadList::SuspendAll(const char* cause, bool long_suspend) {
+  Thread* self = Thread::Current();
+
+  if (self != nullptr) {
+    VLOG(threads) << *self << " SuspendAll for " << cause << " starting...";
+  } else {
+    VLOG(threads) << "Thread[null] SuspendAll for " << cause << " starting...";
+  }
+  ATRACE_BEGIN("Suspending mutator threads");
+  const uint64_t start_time = NanoTime();
+
+  SuspendAllInternal(self, self);
+  // All threads are known to have suspended (but a thread may still own the mutator lock)
+  // Make sure this thread grabs exclusive access to the mutator lock and its protected data.
+#if HAVE_TIMED_RWLOCK
+  while (true) {
+    if (Locks::mutator_lock_->ExclusiveLockWithTimeout(self, kThreadSuspendTimeoutMs, 0)) {
+      break;
+    } else if (!long_suspend_) {
+      // Reading long_suspend without the mutator lock is slightly racy, in some rare cases, this
+      // could result in a thread suspend timeout.
+      // Timeout if we wait more than kThreadSuspendTimeoutMs seconds.
+      UnsafeLogFatalForThreadSuspendAllTimeout();
+    }
+  }
+#else
+  Locks::mutator_lock_->ExclusiveLock(self);
+#endif
+
+  long_suspend_ = long_suspend;
+
+  const uint64_t end_time = NanoTime();
+  const uint64_t suspend_time = end_time - start_time;
+  suspend_all_historam_.AdjustAndAddValue(suspend_time);
+  if (suspend_time > kLongThreadSuspendThreshold) {
+    LOG(WARNING) << "Suspending all threads took: " << PrettyDuration(suspend_time);
+  }
+
+  if (kDebugLocking) {
+    // Debug check that all threads are suspended.
+    AssertThreadsAreSuspended(self, self);
+  }
+
+  ATRACE_END();
+  ATRACE_BEGIN((std::string("Mutator threads suspended for ") + cause).c_str());
+
+  if (self != nullptr) {
+    VLOG(threads) << *self << " SuspendAll complete";
+  } else {
+    VLOG(threads) << "Thread[null] SuspendAll complete";
+  }
+}
+
+=====================
+WorkFlow:
+1. call SuspendAllInternal() to suspend all threads.
+2. exclusively lock the mutator_lock_;
+
+------------------------------------------------ SuspendAllInternal----------------------------------------------
+<src art/runtime/thread_list.cc>
+
+// Ensures all threads running Java suspend and that those not running Java don't start.
+// Debugger thread might be set to kRunnable for a short period of time after the
+// SuspendAllInternal. This is safe because it will be set back to suspended state before
+// the SuspendAll returns.
+void ThreadList::SuspendAllInternal(Thread* self,
+                                    Thread* ignore1,
+                                    Thread* ignore2,
+                                    bool debug_suspend) {
+  Locks::mutator_lock_->AssertNotExclusiveHeld(self);
+  Locks::thread_list_lock_->AssertNotHeld(self);
+  Locks::thread_suspend_count_lock_->AssertNotHeld(self);
+  if (kDebugLocking && self != nullptr) {
+    CHECK_NE(self->GetState(), kRunnable);
+  }
+
+  // First request that all threads suspend, then wait for them to suspend before
+  // returning. This suspension scheme also relies on other behaviour:
+  // 1. Threads cannot be deleted while they are suspended or have a suspend-
+  //    request flag set - (see Unregister() below).
+  // 2. When threads are created, they are created in a suspended state (actually
+  //    kNative) and will never begin executing Java code without first checking
+  //    the suspend-request flag.
+
+  // The atomic counter for number of threads that need to pass the barrier.
+  AtomicInteger pending_threads;
+  uint32_t num_ignored = 0;
+  if (ignore1 != nullptr) {
+    ++num_ignored;
+  }
+  if (ignore2 != nullptr && ignore1 != ignore2) {
+    ++num_ignored;
+  }
+  {
+    MutexLock mu(self, *Locks::thread_list_lock_);
+    MutexLock mu2(self, *Locks::thread_suspend_count_lock_);
+    // Update global suspend all state for attaching threads.
+    ++suspend_all_count_;
+    if (debug_suspend)
+      ++debug_suspend_all_count_;
+    pending_threads.StoreRelaxed(list_.size() - num_ignored);
+    // Increment everybody's suspend count (except those that should be ignored).
+    for (const auto& thread : list_) {
+      if (thread == ignore1 || thread == ignore2) {
+        continue;
+      }
+      VLOG(threads) << "requesting thread suspend: " << *thread;
+      while (true) {
+        if (LIKELY(thread->ModifySuspendCount(self, +1, &pending_threads, debug_suspend))) {
+          break;
+        } else {
+          // Failure means the list of active_suspend_barriers is full, we should release the
+          // thread_suspend_count_lock_ (to avoid deadlock) and wait till the target thread has
+          // executed Thread::PassActiveSuspendBarriers(). Note that we could not simply wait for
+          // the thread to change to a suspended state, because it might need to run checkpoint
+          // function before the state change, which also needs thread_suspend_count_lock_.
+
+          // This is very unlikely to happen since more than kMaxSuspendBarriers threads need to
+          // execute SuspendAllInternal() simultaneously, and target thread stays in kRunnable
+          // in the mean time.
+          Locks::thread_suspend_count_lock_->ExclusiveUnlock(self);
+          NanoSleep(100000);
+          Locks::thread_suspend_count_lock_->ExclusiveLock(self);
+        }
+      }
+
+      // Must install the pending_threads counter first, then check thread->IsSuspend() and clear
+      // the counter. Otherwise there's a race with Thread::TransitionFromRunnableToSuspended()
+      // that can lead a thread to miss a call to PassActiveSuspendBarriers().
+      if (thread->IsSuspended()) {
+        // Only clear the counter for the current thread.
+        thread->ClearSuspendBarrier(&pending_threads);
+        pending_threads.FetchAndSubSequentiallyConsistent(1);
+      }
+    }
+  }
+
+  // Wait for the barrier to be passed by all runnable threads. This wait
+  // is done with a timeout so that we can detect problems.
+#if ART_USE_FUTEXES
+  timespec wait_timeout;
+  InitTimeSpec(true, CLOCK_MONOTONIC, 10000, 0, &wait_timeout);
+#endif
+  while (true) {
+    int32_t cur_val = pending_threads.LoadRelaxed();
+    if (LIKELY(cur_val > 0)) {
+#if ART_USE_FUTEXES
+      if (futex(pending_threads.Address(), FUTEX_WAIT, cur_val, &wait_timeout, nullptr, 0) != 0) {
+        // EAGAIN and EINTR both indicate a spurious failure, try again from the beginning.
+        if ((errno != EAGAIN) && (errno != EINTR)) {
+          if (errno == ETIMEDOUT) {
+            LOG(kIsDebugBuild ? FATAL : ERROR) << "Unexpected time out during suspend all.";
+          } else {
+            PLOG(FATAL) << "futex wait failed for SuspendAllInternal()";
+          }
+        }
+      } else {
+        cur_val = pending_threads.LoadRelaxed();
+        CHECK_EQ(cur_val, 0);
+        break;
+      }
+#else
+      // Spin wait. This is likely to be slow, but on most architecture ART_USE_FUTEXES is set.
+#endif
+    } else {
+      CHECK_EQ(cur_val, 0);
+      break;
+    }
+  }
+}
+=====================
+WorkFlow
+1. hold the thread_list_lock_, to forbid the create/delete of thread.
+2. hold the thread_suspend_count_lock_, to change the suspend_count.
+  3. suspend_all_count_++, a sign of global suspend all.
+  4. if debug, debug_suspend_all_count_++;
+  5. pending_threads, as the barrier, + number of threads should be suspend or already suspended.
+  6. foreach thread in thread_list, thread->ModifySuspendCount(self, +1, &pending_threads, debug_suspend), see "ModifySuspendCount()"
+  7, if thread is already suspended, clear the tls suspend barrier, and sub pending_threads by 1.
+8.(released the lock of 1. 2.)
+9. wait pending_threads_ reduced to 0. which means all thread are suspended.
+
+------------------------------------------------ ModifySuspendCount()----------------------------------------------
+
+<src art/runtime/thread.cc>
+
+bool Thread::ModifySuspendCount(Thread* self, int delta, AtomicInteger* suspend_barrier,
+                                bool for_debugger) {
+  if (kIsDebugBuild) {
+    DCHECK(delta == -1 || delta == +1 || delta == -tls32_.debug_suspend_count)
+          << delta << " " << tls32_.debug_suspend_count << " " << this;
+    DCHECK_GE(tls32_.suspend_count, tls32_.debug_suspend_count) << this;
+    Locks::thread_suspend_count_lock_->AssertHeld(self);
+    if (this != self && !IsSuspended()) {
+      Locks::thread_list_lock_->AssertHeld(self);
+    }
+  }
+  if (UNLIKELY(delta < 0 && tls32_.suspend_count <= 0)) {
+    UnsafeLogFatalForSuspendCount(self, this);
+    return false;
+  }
+
+  uint16_t flags = kSuspendRequest;
+  if (delta > 0 && suspend_barrier != nullptr) {
+    uint32_t available_barrier = kMaxSuspendBarriers;
+    for (uint32_t i = 0; i < kMaxSuspendBarriers; ++i) {
+      if (tlsPtr_.active_suspend_barriers[i] == nullptr) {
+        available_barrier = i;
+        break;
+      }
+    }
+    if (available_barrier == kMaxSuspendBarriers) {
+      // No barrier spaces available, we can't add another.
+      return false;
+    }
+    tlsPtr_.active_suspend_barriers[available_barrier] = suspend_barrier;
+    flags |= kActiveSuspendBarrier;
+  }
+
+  tls32_.suspend_count += delta;
+  if (for_debugger) {
+    tls32_.debug_suspend_count += delta;
+  }
+
+  if (tls32_.suspend_count == 0) {
+    AtomicClearFlag(kSuspendRequest);
+  } else {
+    // Two bits might be set simultaneously.
+    tls32_.state_and_flags.as_atomic_int.FetchAndOrSequentiallyConsistent(flags);
+    TriggerSuspend();
+  }
+  return true;
+}
+=======================
+WorkFlow:
+This is function on every thread, not thread list.
+only 3 possible value (+1, -1, -debug_suspend_count) for delta.
+1. flag = kSuspendRequest 
+2. if suspend_barrier != null, set the tlsPtr_.active_suspend_barriers[i], it will be pass() after suspended.
+  2.1 and if successfuly set suspend_barrier[i], flag |= kActiveSuspendBarrier;
+3. tls32_.suspend_count += delta, tls32_.debug_suspend_count += delta;
+4. if tls32_.suspend_count == 0, clear the flag of kSuspendRequest in tls32.state_and_flags.
+   means thread will not be suspended any more.
+5. if tls32.suspend_count != 0, set tls32.state_and_flags to flag (kSuspendReuqest | kActiveSuspendBarrier);
+  5.1 and triggerSuspend(), this set tls32.suspend_trigger to nullptr (???)
+
+=============================== Description of SuspendAll ==========================================================
+Lock thread_list to forbid the create/delete of threads,and call ModifySuspendCount() for every thread to change the 
+thread local flags and set barrier for them, and for threads not in runnable, pass the barrier for them, but suspend
+cound still modified, which will block them resume to Runnable. then wait on all thread to pass the barrier.
+after all thread pass the barrier, exclusively lock the mutator_lock_.
+
+Rule behind:
+1. All thread in runnable will finally check the thread local flag and suspend them if necessory, then the barrier will
+be passed after thread suspended.
+2. Thread already in !Runnable states after barrier passed.
+
+====================================================================================================================
+
+
+
+=============================== ResumeAll ==========================================================================
+<src art/runtime/thread_list.cc>
+
+void ThreadList::ResumeAll() {
+  Thread* self = Thread::Current();
+
+  if (self != nullptr) {
+    VLOG(threads) << *self << " ResumeAll starting";
+  } else {
+    VLOG(threads) << "Thread[null] ResumeAll starting";
+  }
+
+  ATRACE_END();
+  ATRACE_BEGIN("Resuming mutator threads");
+
+  if (kDebugLocking) {
+    // Debug check that all threads are suspended.
+    AssertThreadsAreSuspended(self, self);
+  }
+
+  long_suspend_ = false;
+
+  Locks::mutator_lock_->ExclusiveUnlock(self);
+  {
+    MutexLock mu(self, *Locks::thread_list_lock_);
+    MutexLock mu2(self, *Locks::thread_suspend_count_lock_);
+    // Update global suspend all state for attaching threads.
+    --suspend_all_count_;
+    // Decrement the suspend counts for all threads.
+    for (const auto& thread : list_) {
+      if (thread == self) {
+        continue;
+      }
+      thread->ModifySuspendCount(self, -1, nullptr, false);
+    }
+
+    // Broadcast a notification to all suspended threads, some or all of
+    // which may choose to wake up.  No need to wait for them.
+    if (self != nullptr) {
+      VLOG(threads) << *self << " ResumeAll waking others";
+    } else {
+      VLOG(threads) << "Thread[null] ResumeAll waking others";
+    }
+    Thread::resume_cond_->Broadcast(self);
+  }
+  ATRACE_END();
+
+  if (self != nullptr) {
+    VLOG(threads) << *self << " ResumeAll complete";
+  } else {
+    VLOG(threads) << "Thread[null] ResumeAll complete";
+  }
+}
+
+=======================
+WorkFlow:
+1. exclusive unlock the mutator_lock_, to allow pending thread not blocked by mutator_lock_.
+2. hold thread_list_lock_ and thread_suspend_count_lock_.
+  3. --suspend_all_count.
+  4. for every thread in thread_list, call ModifySuspendCount(self, -1, nullptr, false), to 
+     clear the kSuspendRequest from flag if thread local suspend count == 0.
+  5. resume_cond_->Broadcast(self), to let suspended thread continue to run after flag kSuspendRequest 
+     has been cleaned.
+
+======================================================================================================
+At the thread Level, if thread is Runnable, it will use following method to achieve the state transit
+between Runnable and !Runnable.
+
+================================= 
+
+
+
