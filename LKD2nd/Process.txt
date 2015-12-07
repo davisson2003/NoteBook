@@ -1,0 +1,60 @@
+1. processes provide two virtualizations: 
+  * a virtualized processor
+  * a virtual memory
+2. fork() 
+  * return froms from the kernel twice: child pid for parent, 0 for child.
+  * actually implemented via clone() system call.
+
+3. exit()
+  * terminates the process and free all its resources.
+  * parents can inquire about the status of terminated child via wait4().
+  * when process exits, it is placed into a special zombie state until the parents call wait() or waitpid().
+
+4. linux kernel refers to task as process.
+
+5. task list: 
+  * circular doubly linked list. element is process descriptor.(struct task_struct).<linux/sched.h>. it contais all info about a process.
+
+6. task_struct (process descriptor)
+  * a huge struct.
+  * contains process info like: process's addr space; pending signals; process state, pid, prio etc.  see src of task_struct in linux/sched.h
+  * allocated in kernal with slab allocator.
+  * inside kernel, process are referenced directly by a ptr to task_struct.
+  * most of process change are directly implenmented by modify its task_struct.
+  * how to get the current task_struct is depend on arch. 
+    ** x86 using the rule that thread_info is on the top of the stack.
+       so it calculated the task_struct with masking the least 13 bits
+       of stack pointer to get thread_info and then get task_struct.
+       (see Fig 3.2 at page 26 in LKD).
+    ** PPC use one register to point to current task_struct directly.
+
+7. thread_info. (contain task_struct)
+  * live at the bottom(/top) of the stack.
+  * the task_struct actually points to the task_struct.
+
+8. pid:
+  * default maximum value is 32768. will wrap around if reach.
+  * can change by modify /proc/sys/kernel/pid_max.
+
+9. process state:
+  * TASK_RUNNING: 
+     either running or in the runqueue waiting to run.
+     only possible state for user-space executing process.
+  * TASK_INTERRUPTIBLE:
+     sleeping, wait for some condition to exist, or a signal.
+  * TASK_UNINTERRUPTIBLE: 
+     sleeping, wait for some condition to exist. but not a signal.
+  * TASK_ZOMBIE:
+     terminated, but parent not issued wait4(). so task_struct must remain
+     in case the parent access it. 
+     after parent issued wait4(), task_struct is deallocated.
+  * TASK_STOPPED：
+     Processes are stoped by SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU. 
+ 
+  ** set_task_state(task, state) to set the tast state. 
+     there will be memory arrier to force ordering on processors.
+
+10. process context:
+  process running in user-space can change to run into kernel-space only
+  through system calls or exception handler. and the kernel is said to 
+  "execute on behalf of the process" and is in process context.
