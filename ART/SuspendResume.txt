@@ -381,9 +381,173 @@ For SOA, it actually use the ScopedThreadStateChange class instance to achieve t
 --------------------------- ScopedThreadStateChange ---------------------------------------------
 <src art/runtime/scoped_thread_state_change.h>
 
+class ScopedThreadStateChange : public ValueObject {
+ public:
+  ScopedThreadStateChange(Thread* self, ThreadState new_thread_state)
+      REQUIRES(!Locks::thread_suspend_count_lock_) ALWAYS_INLINE
+      : self_(self), thread_state_(new_thread_state), expected_has_no_thread_(false) {
+    if (UNLIKELY(self_ == nullptr)) {
+      // Value chosen arbitrarily and won't be used in the destructor since thread_ == null.
+      old_thread_state_ = kTerminated;
+      Runtime* runtime = Runtime::Current();
+      CHECK(runtime == nullptr || !runtime->IsStarted() || runtime->IsShuttingDown(self_));
+    } else {
+      DCHECK_EQ(self, Thread::Current());
+      // Read state without locks, ok as state is effectively thread local and we're not interested
+      // in the suspend count (this will be handled in the runnable transitions).
+      old_thread_state_ = self->GetState();
+      if (old_thread_state_ != new_thread_state) {
+        if (new_thread_state == kRunnable) {
+          self_->TransitionFromSuspendedToRunnable();
+        } else if (old_thread_state_ == kRunnable) {
+          self_->TransitionFromRunnableToSuspended(new_thread_state);
+        } else {
+          // A suspended transition to another effectively suspended transition, ok to use Unsafe.
+          self_->SetState(new_thread_state);
+        }
+      }
+    }
+  }
 
+  ~ScopedThreadStateChange() REQUIRES(!Locks::thread_suspend_count_lock_) ALWAYS_INLINE {
+    if (UNLIKELY(self_ == nullptr)) {
+      if (!expected_has_no_thread_) {
+        Runtime* runtime = Runtime::Current();
+        bool shutting_down = (runtime == nullptr) || runtime->IsShuttingDown(nullptr);
+        CHECK(shutting_down);
+      }
+    } else {
+      if (old_thread_state_ != thread_state_) {
+        if (old_thread_state_ == kRunnable) {
+          self_->TransitionFromSuspendedToRunnable();
+        } else if (thread_state_ == kRunnable) {
+          self_->TransitionFromRunnableToSuspended(old_thread_state_);
+        } else {
+          // A suspended transition to another effectively suspended transition, ok to use Unsafe.
+          self_->SetState(old_thread_state_);
+        }
+      }
+    }
+  }
+=========================
+So the two important functions are: 
+* self->TransitionFromSuspendedToRunnable();
+* self->TransitionFromRunnableToSuspended(old_thread_state_);
 
+---------------------------- TransitionFromSuspendedToRunnable()----------------------------------------
+<src art/runtime/thread-inl.h>
 
+inline ThreadState Thread::TransitionFromSuspendedToRunnable() {
+  union StateAndFlags old_state_and_flags;
+  old_state_and_flags.as_int = tls32_.state_and_flags.as_int;
+  int16_t old_state = old_state_and_flags.as_struct.state;
+  DCHECK_NE(static_cast<ThreadState>(old_state), kRunnable);
+  do {
+    Locks::mutator_lock_->AssertNotHeld(this);  // Otherwise we starve GC..
+    old_state_and_flags.as_int = tls32_.state_and_flags.as_int;
+    DCHECK_EQ(old_state_and_flags.as_struct.state, old_state);
+    if (LIKELY(old_state_and_flags.as_struct.flags == 0)) {
+      // Optimize for the return from native code case - this is the fast path.
+      // Atomically change from suspended to runnable if no suspend request pending.
+      union StateAndFlags new_state_and_flags;
+      new_state_and_flags.as_int = old_state_and_flags.as_int;
+      new_state_and_flags.as_struct.state = kRunnable;
+      // CAS the value with a memory barrier.
+      if (LIKELY(tls32_.state_and_flags.as_atomic_int.CompareExchangeWeakAcquire(
+                                                 old_state_and_flags.as_int,
+                                                 new_state_and_flags.as_int))) {
+        // Mark the acquisition of a share of the mutator_lock_.
+        Locks::mutator_lock_->TransitionFromSuspendedToRunnable(this);
+        break;
+      }
+    } else if ((old_state_and_flags.as_struct.flags & kActiveSuspendBarrier) != 0) {
+      PassActiveSuspendBarriers(this);
+    } else if ((old_state_and_flags.as_struct.flags & kCheckpointRequest) != 0) {
+      // Impossible
+      LOG(FATAL) << "Transitioning to runnable with checkpoint flag, "
+                 << " flags=" << old_state_and_flags.as_struct.flags
+                 << " state=" << old_state_and_flags.as_struct.state;
+    } else if ((old_state_and_flags.as_struct.flags & kSuspendRequest) != 0) {
+      // Wait while our suspend count is non-zero.
+      MutexLock mu(this, *Locks::thread_suspend_count_lock_);
+      old_state_and_flags.as_int = tls32_.state_and_flags.as_int;
+      DCHECK_EQ(old_state_and_flags.as_struct.state, old_state);
+      while ((old_state_and_flags.as_struct.flags & kSuspendRequest) != 0) {
+        // Re-check when Thread::resume_cond_ is notified.
+        Thread::resume_cond_->Wait(this);
+        old_state_and_flags.as_int = tls32_.state_and_flags.as_int;
+        DCHECK_EQ(old_state_and_flags.as_struct.state, old_state);
+      }
+      DCHECK_EQ(GetSuspendCount(), 0);
+    }
+  } while (true);
+  // Run the flip function, if set.
+  Closure* flip_func = GetFlipFunction();
+  if (flip_func != nullptr) {
+    flip_func->Run(this);
+  }
+  return static_cast<ThreadState>(old_state);
+}
 
+=========================
+WorkFlow:
+1. loop:
+   2. if thread's flag == 0, means nothing want to block the thread, update the 
+      flag to runnable and the thread registered to shared hold the muator_lock
+      (but not actually acquired lock). then, break the loop to 5.
+   3. if thread's flag has kActiveSuspendBarrier, pass all the barrier for this thread.
+   4. if thread's flag has kSuspendRequest, means there is suspendAll() on going, 
+      need to wait for the flag to change, and then wait on the resume_condition.
+      (because resume all will signal/broadcast it.)
+  ** please note 3 and 4 don't change the statues to runnable, and keep in loop, they will
+     finaly go bace to 2, and then change the runnable and break.
+2. when thread in runnable (leave from the loop), run flip_function.
+3. return the old_state, which will be used when transition back.
 
+----------------------------TransitionFromRunnableToSuspended-----------------------------------------------
+<src art/runtime/thread-inl.h>
+
+inline void Thread::TransitionFromRunnableToSuspended(ThreadState new_state) {
+  AssertThreadSuspensionIsAllowable();
+  DCHECK_EQ(this, Thread::Current());
+  // Change to non-runnable state, thereby appearing suspended to the system.
+  TransitionToSuspendedAndRunCheckpoints(new_state);
+  // Mark the release of the share of the mutator_lock_.
+  Locks::mutator_lock_->TransitionFromRunnableToSuspended(this);
+  // Once suspended - check the active suspend barrier flag
+  PassActiveSuspendBarriers();
+}
+
+inline void Thread::TransitionToSuspendedAndRunCheckpoints(ThreadState new_state) {
+  DCHECK_NE(new_state, kRunnable);
+  DCHECK_EQ(GetState(), kRunnable);
+  union StateAndFlags old_state_and_flags;
+  union StateAndFlags new_state_and_flags;
+  while (true) {
+    old_state_and_flags.as_int = tls32_.state_and_flags.as_int;
+    if (UNLIKELY((old_state_and_flags.as_struct.flags & kCheckpointRequest) != 0)) {
+      RunCheckpointFunction();
+      continue;
+    }
+    // Change the state but keep the current flags (kCheckpointRequest is clear).
+    DCHECK_EQ((old_state_and_flags.as_struct.flags & kCheckpointRequest), 0);
+    new_state_and_flags.as_struct.flags = old_state_and_flags.as_struct.flags;
+    new_state_and_flags.as_struct.state = new_state;
+
+    // CAS the value with a memory ordering.
+    bool done =
+        tls32_.state_and_flags.as_atomic_int.CompareExchangeWeakRelease(old_state_and_flags.as_int,
+                                                                        new_state_and_flags.as_int);
+    if (LIKELY(done)) {
+      break;
+    }
+  }
+}
+=========================
+WorkFlow:
+1. check the flag to see whether there is checkpoint funtion. if yes, run the checkpoint function (thread in runnable).
+   RunCheckpointFunction() runs the checkpoint function and clear the kCheckpointRequest Flag.
+   checkpoint can only be installed when thread is runnable.
+2. change the status to suspend (new_state).
+3. register the thread as not holding the mutator_lock (not actually release).
 
