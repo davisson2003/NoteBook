@@ -58,3 +58,28 @@
   process running in user-space can change to run into kernel-space only
   through system calls or exception handler. and the kernel is said to 
   "execute on behalf of the process" and is in process context.
+
+11. Process Family Tree:
+  * init(init_task) process pid = 1. the first process after boot, created at the last
+  step of boot process. all processes are decendentsfrom init. 
+  * each task_struct->parent point to parent's task_struct. 
+  * task_struct->children is a list of children task_struct.
+  * iterate over a process's children:
+    struct task_struct *task;
+    struct list_head* list;
+    list_for_each(list, &current->children) {
+      task = list_entry(list, struct tast_struct, sibling)
+      // task now point to process's one child.
+    }
+  * for_each_process(task) task will iterate all process in system.
+
+12. process creation:
+    * fork(): 
+      ** copy of parent, except PID, PPID, pending signals etc
+      ** implemented via clone() system call, 
+         and clone() calls do_fork(). (kernel/fork.c)
+         do_fork() calls copy_process()
+         *** 
+      ** 
+    * exec(): load new executable into the address space and begin executing
+
