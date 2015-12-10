@@ -79,7 +79,22 @@
       ** implemented via clone() system call, 
          and clone() calls do_fork(). (kernel/fork.c)
          do_fork() calls copy_process()
-         *** 
-      ** 
+         *** copy_process calls dup_task_struct(): create new kernel stack, thread_info and task_struct. the child and parent task_struct are same. 
+          **** then it checks whether the new child will not exceed the resource limits on the number of processes for current user.
+          **** then child differentiate itself from its parent, various members of task_struct are cleared or set to initial value. the bulk of data in task_struct are shared.
+          **** child state set to TASK_UNINTERRUPTIBLE to ensure it doesn't yet run.
+          **** calls copy_flags() to update the flags of tast_struct. PF_SUPERPRIV (super privileges) cleared, PF_FORKNONEXEC is set (forked but not exec())
+          **** get_pid() to assign an available PID
+          **** Depending on the flags passed to clone(), copy_process() then either duplicate or share open files, filesystem info, signal handlers, process address space, and namespace. (shared between threads, but dup for processes.)
+          **** Time slice between parent and child is split between the two.
+          **** return the ptr to new task.
+      ** do_fork() will run the child. kernel first run child and then parent, this eliminate the copy-on-write overhead because child usually call exec() immediately.
+
+    * vfork() is same as fork(), except that pagetable entries are not copied. child executes as the sole thread in parent's address space. parents block until child call exec() or exit.
+
     * exec(): load new executable into the address space and begin executing
+
+13. Threads Implementation
+* Threads is merely a process that shares certain resources with other processes. 
+* Every thread has unique task_struct and appears to the kernel as normal process.
 
