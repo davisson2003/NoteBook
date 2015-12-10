@@ -97,4 +97,21 @@
 13. Threads Implementation
 * Threads is merely a process that shares certain resources with other processes. 
 * Every thread has unique task_struct and appears to the kernel as normal process.
+* follow clone() flags for fork thread. clone(CLONE_VM| CLONE_FS| CLONE_FILES | CLONE_SIGHAND, 0);
+* flages mean share address space, filesystem resources, file descriptors, and signal handlers.
+ ** normal process fork: clone(SIGCHLD,0);
+ ** vfork is implemented: clone(CLONE_VFORK | CLONE_VM | SIGCHLD, 0);
+* flags for clone are defined in <linux/sched.h>
 
+14. Kernel Threads:
+* Normal processes that exist solely in kernel space.
+* no address space (mm ptr is null)
+* operate only in kernel-space
+* do not context-switch to user-space.
+* schedulable and preemptable as normal processes.
+* kernel thread can only create by kernel thread.
+* int kernel_thread(int (*fn)(void*), void* arg, unsigned long flags) calls clone with specific flag. child will run fn with arg. parent kernel thread exist with a pointer to child's task_struct.
+
+15. Process Termination.
+* when exit() is called.
+* call do_exit() 
