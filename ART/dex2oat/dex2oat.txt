@@ -107,6 +107,15 @@ class QuickCompilerCallbacks FINAL : public CompilerCallbacks {
    DexFileToMethodInlinerMap* const method_inliner_map_;
 }
 
+class CompilerCallbacks {
+   enum class CallbackMode { 
+      kCompileBootImage,
+      kCompileApp
+   }
+ // Whether the compiler is creating a boot image.   
+   const CallbackMode mode_;  
+}
+
 --------------------- DexFileToMethodInlinerMap -----------------------------------
 <src art/compiler/dex/quick/dex_file_to_method_inliner_map.h>
 
@@ -386,3 +395,52 @@ class DexFileMethodInliner {
     SafeMap<uint32_t, InlineMethod> inline_methods_ GUARDED_BY(lock_);
     const DexFile* dex_file_;
 };
+---------------- InlineMethod ---------------------------------------------------
+<src art/runtime/quick/inline_method_analyser.h>
+struce InlineMethod {
+  InlineMethodOpcode opcode;
+  InlineMethodFlags flag;
+  union {
+    uint64_t data;
+    InlineIGetIPutData ifield_data;
+    InlineReturnArgData return_data;
+  } d;
+}
+-------
+Desc:
+* InlineMethodOpcode contains intrinsics (like kIntrinsicIndexOf) and InlineOp (kInlineOpNop, ReturnArg, NonWideConst,IGet/IPut and StringInit)
+* InlineMethodFlags : NoInlineMethodFlags, kInlineIntrinsic ,  kInlineSpecial 
+* InlineIGetIPutData: 
+    struct InlineIGetIPutData {
+      // The op_variant below is DexMemAccessType but the runtime doesn't know that enumeration.
+      uint16_t op_variant : 3;
+      uint16_t method_is_static : 1;
+      uint16_t object_arg : 4;
+      uint16_t src_arg : 4;  // iput only
+      uint16_t return_arg_plus1 : 4;  // iput only, method argument to return + 1, 0 = return void.
+      uint16_t field_idx;
+      uint32_t is_volatile : 1;
+      uint32_t field_offset : 31;
+    };
+* InlineReturuArgData: 
+    struct InlineReturnArgData {
+      uint16_t arg;
+      uint16_t is_wide : 1;
+      uint16_t uint16_t is_object : 1;
+      uint16_t reserved : 14;
+      uint32_t reserved2;
+    };
+------------------------------------------------------------------------------------------
+QuickCompilerCallbacks() Desc:
+* it contains two components:
+  ** verification_results_ contains:
+    *** compiler_options_,
+    *** VerifiedMethodMap verified_methods_; contains MethodReference(dexfile+index) and VerifiedMethods(meta info likd gc map.) 
+    *** rejected classes set.
+  ** method_inliner_map, contains:
+    *** inliners_ (map with dexfile and DexFileMethodInliner(contains dexfile and map<m_index, InlineMethod>))
+    InlineMethod describes the method need to be inlined (opcode, flag, data).
+    
+===========================================================================================
+===========================================================================================
+
