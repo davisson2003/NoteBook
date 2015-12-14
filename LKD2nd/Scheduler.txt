@@ -1,0 +1,14 @@
+* Select which process to run next.
+
+* Multitasking OS come in 2 flavors: 
+  ** cooperative multitasking
+    *** a process doesn't stop running until it voluntary decide to do so (yielding)
+
+  ** preemptive multitasking (Linux and most  Modern OS)
+    *** preamption: The act of involuntarily suspending a running process.
+    *** timeslice: The time a process runs before it is preempted. and it is predetermined. gives each runnable process a slice of processor's time.
+=======================================================================================================================================================
+
+* O(1) scheduler. 
+
+

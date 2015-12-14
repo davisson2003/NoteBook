@@ -98,7 +98,7 @@
 * Threads is merely a process that shares certain resources with other processes. 
 * Every thread has unique task_struct and appears to the kernel as normal process.
 * follow clone() flags for fork thread. clone(CLONE_VM| CLONE_FS| CLONE_FILES | CLONE_SIGHAND, 0);
-* flages mean share address space, filesystem resources, file descriptors, and signal handlers.
+* flags mean share address space, filesystem resources, file descriptors, and signal handlers.
  ** normal process fork: clone(SIGCHLD,0);
  ** vfork is implemented: clone(CLONE_VFORK | CLONE_VM | SIGCHLD, 0);
 * flags for clone are defined in <linux/sched.h>
@@ -114,4 +114,11 @@
 
 15. Process Termination.
 * when exit() is called.
-* call do_exit() 
+* call do_exit()
+* when finish , thread in TASK_ZOMBIE state. (memory occupies:  kernel stack, thread_info, task_struct) 
+* this allow system to obtain info about a child process after it terminated.
+* after parent call wait() family func, child's task_struct will be deallocated. 
+* wait4() suspend the calling task until its children exits. the func at that time will return PID of the exited task.
+* when thread exit, it's children are reparent to the thread in same group. or init.
+* when a task is ptraced, it is temporarily reparented to debugging process.
+

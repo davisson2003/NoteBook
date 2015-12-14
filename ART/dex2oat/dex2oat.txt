@@ -431,11 +431,13 @@ Desc:
       uint32_t reserved2;
     };
 ------------------------------------------------------------------------------------------
+******************************************************************************************
+******************************************************************************************
 QuickCompilerCallbacks() Desc:
 * it contains two components:
   ** verification_results_ contains:
     *** compiler_options_,
-    *** VerifiedMethodMap verified_methods_; contains MethodReference(dexfile+index) and VerifiedMethods(meta info likd gc map.) 
+    *** VerifiedMethodMap verified_methods_; contains MethodReference(dexfile+index) and VerifiedMethods(meta info like gc map.) 
     *** rejected classes set.
   ** method_inliner_map, contains:
     *** inliners_ (map with dexfile and DexFileMethodInliner(contains dexfile and map<m_index, InlineMethod>))
@@ -443,4 +445,6 @@ QuickCompilerCallbacks() Desc:
     
 ===========================================================================================
 ===========================================================================================
+
+
 
