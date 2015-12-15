@@ -447,4 +447,24 @@ QuickCompilerCallbacks() Desc:
 ===========================================================================================
 
 
+===========================================================================================
+=================== PrepareRuntimeOptions() ===============================================
+<src dex2oat/dex2oat.cc>
+* Runtime-option  --- value --- (dex2oat options)
+
+* "-Xbootclasspath:" --- dex_filenames_ (--dex-file=)
+* "-Xbootclasspath-locations:" --- dex_locations_ ("--dex-location=")
+* "-Ximage:" --- boot_image_fileiname_ (--boot-image= or getenv(ANDROID_ROOT) + "/framework/boot.art")
+* "compilercallbacks" --- callback
+* "imageinstructionset" --- GetInstructionSetString(instruction_set)
+* "-Xno-dex-file-fallback" --- nullptr (only if !BootImage())
+* "-Xno-sig-chain" --- nullptr
+
+==========================================================================================
+=================== CreateRuntime(std::move(runtime_options)) ============================
+<src dex2oat/dex2oat.cc>
+
+
+
+
 
