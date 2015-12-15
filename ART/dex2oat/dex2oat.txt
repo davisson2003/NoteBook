@@ -464,6 +464,41 @@ QuickCompilerCallbacks() Desc:
 =================== CreateRuntime(std::move(runtime_options)) ============================
 <src dex2oat/dex2oat.cc>
 
+1. Runtime::Create(std::move(runtime_options)) to create runtime with the option
+2. runtime_->SetInstructionSet(instruction_set_) 
+  * this set the instruction_set_ and 
+  * initialize Runtime::callee_save_method_frame_infos_[i] to XXXCalleeSaveMethodFrameInfo(type)
+  Here i and type is the iteration of CalleeSaveType (kSaveAll, kRefsOnly, kRefsAndArgs)
+  * init of XXXCalleeSaveMethodFrameInfo(type) inside create QuickMethodFrameInfo, and initialize the frame_size_in_bytes_, core_spill_mask_ and fp_spill_mask_ field due to the type parameter.
+  ** 
+  ** example for ARM:
+     1. type = 
+     frame_size_in_bytes_ == 
+  ** example for X86:
+     1. Register Code: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI (from 0 to 7)
+        KNumberOfCpuRegisters = 8;
+        kFirstByteUnsafeRegister = 4;
+        kNoRegister = -1;
+
+     2. kX86CalleeSaveRefSpills = EBP, ESI, EDI for "1" at bit mask.  
+        kX86CalleeSaveArgSpills = ECX, EDX, EBX for "1" at bit mask.
+        kX86CalleeSaveFpArgSpills = XMM0--XMM3
+
+     3. QuickMethodFrameInfo() 
+        * frame_size_in_bytes is calculated by:
+           (
+            POPCOUNT(X86CalleeSaveCoreSpills(type)) /* gprs */ + 
+            2 * POPCOUNT(X86CalleeSaveFpSpills(type)) /* fprs */ + 
+            1 /* Method* */
+           ) * kX86PointerSize 
+
+        * CoreSpills: 
+        ** type == kSaveAll or kRefsOnly, it is kX86CalleeSaveRefSpills | 1 << art::x86::kNumberOfCpuRegisters) // for return address callee save.
+        ** type == kRefsAndArgs, it is kX86CalleeSaveRefSpills | kX86CalleeSaveArgsSpills | 1 << kNumberOfCpuRegisters
+
+        * FpSpills:
+        kX86CalleeSaveFpArgsSpill for type == kRefsAndArgs, 0 otherwise.
+
 
 
 
