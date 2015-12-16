@@ -465,26 +465,59 @@ QuickCompilerCallbacks() Desc:
 <src dex2oat/dex2oat.cc>
 
 1. Runtime::Create(std::move(runtime_options)) to create runtime with the option
+
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
-  * initialize Runtime::callee_save_method_frame_infos_[i] to XXXCalleeSaveMethodFrameInfo(type)
+  * initialize Runtime::callee_save_method_frame_infos_[i] to XXXCalleeSaveMethodFrameInfo(type), which actually create QuickMethodFrameInfo.
   Here i and type is the iteration of CalleeSaveType (kSaveAll, kRefsOnly, kRefsAndArgs)
   * init of XXXCalleeSaveMethodFrameInfo(type) inside create QuickMethodFrameInfo, and initialize the frame_size_in_bytes_, core_spill_mask_ and fp_spill_mask_ field due to the type parameter.
-  ** 
-  ** example for ARM:
-     1. type = 
-     frame_size_in_bytes_ == 
-  ** example for X86:
+  ** Different ARCHs: (****** CALLING CONVENTION **********)
+ 
+  ** ARM:
+     1. Register Code: 
+        R0 -- R15 ( from 0 to 15), TR = 9(thread register), FP = 11, IP = 12, SP = 13, LR = 14, PC=15
+  
+     2. CalleeSave Regs:
+        kArmCalleeSaveAlwaysSpills: LR
+        kArmCalleeSaveRefSpills: R5, R6, R7, R8, R10, R11.
+        Args Regs: kArmCalleeSaveArgSpills: R1, R2, R3
+        kArmCalleeSaveAllSpills: R4, R9
+        
+        kArmCalleeSaveFpArgSpills: S0--S15
+        kArmCalleeSaveFpAllSpills: S16--S32
+        others for FP are 0(means null)
+
+     3. QuickMethodFrameInfo( frame_size_in_bytes, core_spills, fp_spills) 
+        * frame_size_in_bytes is calculated by:
+          (
+           POPCOUNT(ArmCalleeSaveCoreSpills(type)) /* gprs */ +
+           POPCOUNT(ArmCalleeSaveFpSpills(type)) /* fprs */ +
+           1 /* Method* */
+          ) * kArmPointerSize
+
+        * CoreSpills: 
+          kArmCalleeSaveAlwaysSpills | 
+          kArmCalleeSaveRefSpills |
+          (type == Runtime::kRefsAndArgs ? kArmCalleeSaveArgSpills : 0) |
+          (type == Runtime::kSaveAll ? kArmCalleeSaveAllSpills : 0)
+     
+        * FpSpills:
+          kArmCalleeSaveFpAlwaysSpills | 
+          kArmCalleeSaveFpRefSpills | 
+          (type == Runtime::kRefsAndArgs ? kArmCalleeSaveFpArgSpills: 0) | 
+          (type == Runtime::kSaveAll ? kArmCalleeSaveFpAllSpills : 0)
+
+  ** X86:
      1. Register Code: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI (from 0 to 7)
         KNumberOfCpuRegisters = 8;
         kFirstByteUnsafeRegister = 4;
         kNoRegister = -1;
 
-     2. kX86CalleeSaveRefSpills = EBP, ESI, EDI for "1" at bit mask.  
-        kX86CalleeSaveArgSpills = ECX, EDX, EBX for "1" at bit mask.
-        kX86CalleeSaveFpArgSpills = XMM0--XMM3
+     2. CalleeSave Regs: kX86CalleeSaveRefSpills = EBP, ESI, EDI for "1" at bit mask.  
+        Args Regs: kX86CalleeSaveArgSpills = ECX, EDX, EBX for "1" at bit mask.
+        XMM: kX86CalleeSaveFpArgSpills = XMM0--XMM3
 
-     3. QuickMethodFrameInfo() 
+     3. QuickMethodFrameInfo( frame_size_in_bytes, core_spills, fp_spills) 
         * frame_size_in_bytes is calculated by:
            (
             POPCOUNT(X86CalleeSaveCoreSpills(type)) /* gprs */ + 
@@ -500,6 +533,107 @@ QuickCompilerCallbacks() Desc:
         kX86CalleeSaveFpArgsSpill for type == kRefsAndArgs, 0 otherwise.
 
 
+  ** X86_64:
+     1. Register Code: RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15 (from 0 to 15)
+        kLastCpuRegister = 15,
+        KNumberOfCpuRegisters = 16;
+        kNoRegister = -1;
+
+     2. CalleeSave Regs: kX86_64CalleeSaveRefSpills = RBX, RBP, R12, R13, R14, R15 for "1" at bit mask.  
+        Args Regs: kX86_64CalleeSaveArgSpills = RSI, RDX, RCX, R8, R9 for "1" at bit mask.
+        XMM: 
+            kX86_64CalleeSaveFpSpills = XMM12 -- XMM15
+            kX86_64CalleeSaveFpArgSpills = XMM0 -- XMM7
+
+     3. QuickMethodFrameInfo( frame_size_in_bytes, core_spills, fp_spills) 
+        * frame_size_in_bytes is calculated by:
+           (
+            POPCOUNT(X86_64CalleeSaveCoreSpills(type)) /* gprs */ + 
+            POPCOUNT(X86_64CalleeSaveFpSpills(type)) /* fprs */ + 
+            1 /* Method* */
+           ) * kX86PointerSize 
+
+        * CoreSpills: 
+        ** type == kSaveAll or kRefsOnly, it is kX86_64CalleeSaveRefSpills | 1 << art::x86_64::kNumberOfCpuRegisters) // for return address callee save.
+        ** type == kRefsAndArgs, it is kX86_64CalleeSaveRefSpills | kX86_64CalleeSaveArgsSpills | 1 << kNumberOfCpuRegisters
+
+        * FpSpills:
+        X86_64CalleeSaveFpSpills| X86_64CalleeSaveFpArgsSpill for type == kRefsAndArgs, 
+        X86_64CalleeSaveFpSpills otherwise.
 
 
+3. if calleeSaveMethod for calleeSaveType i not exist. create one:
+   runtime_->SetCalleeSaveMethod(runtime_->CreateCalleeSaveMethod(), type);
+   
+   * Runtime::SetCalleeSaveMethod(Artmethod* method, CalleeSaveType type) just set the  callee_save_methods_[type] = method.
+   * Runtime::CreateCalleeSaveMethod(): 
+     ** auto* method = Runtime::Current()->GetClassLinker()->CreateRuntimeMethod();
+       *** Allocate a 1 length MethodArray in LinearAlloc(),  ArtMethod* method = &method_array->At(0, method_size, method_alignment); 
+       *** and method have no dexMethodIndex.  method->SetDexMethodIndex(DexFile::kDexNoIndex); 
+       *** method content is not initialized, supposed to be all 0s.
 
+     ** method->SetEntryPointFromQuickCompiledCodePtrSize(nullptr, pointer_size); 
+       *** ((ArtMethod*)method)->ptr_sized_fields_-> entry_point_from_quick_compiled_code_ = nullptr
+ -------------------------------------------------------------------------------------------------------------
+ ----------- class ArtMethod --------------------------------------------------------------------------------
+ 
+ class ArtMethod {
+
+   protected: 
+
+    // class we are part of.
+    GcRoot<mirror::Class> declaring_class_;   
+    
+    // Access flags; low 16 bits are defined by spec.
+    uint32_t access_flags_; 
+
+    /* Dex file fields. The defining dex file is available via declaring_class_->dex_cache_ */
+
+    // offset of the dex code item.
+    uint32_t dex_code_item_offset;
+
+    // index of the method_ids of the dex file for this method
+    uint32_t dex_method_index;
+
+     /* End of dex file fields. */   
+
+    // Entry within a dispatch table for this method.
+    // for static/direct methods the index is into the declaring_class_.directMethods.
+    // for virtual methods the index is into the vtable.
+    // for interface methods the index is into the iftable.
+    uint16_t method_index;
+
+    // The hotness we measure for the method. incremented by interpreter, Not atomic as it is ok to missing some inc.
+    uint16_t hotness.
+    
+    // Fake padding fields get inserted here.
+
+    // Must be the last fields in the method.
+    // PACKED(4) is necessory for correctness of
+    // RoundUp(OFFSETOF_MEMBER(ArtMethod, ptr_sized_fields_), pointer_size). 
+    struct PACKED(4) PtrSizedFields {
+     
+      // Short cuts to declaring_class_->dex_cache_ member for fast compiled code access
+      ArtMethod** dex_cache_resolved_methods_;
+
+      // Short cuts to declaring_class_->dex_cache_ member for fast compiled code access
+      GcRoot(mirror::Class>* dex_cache_resolved_types_;
+
+      // Ptr to JNI function registered to this method. or a function to resolve the JNI function.
+      // or the profiling data for non-native methods.
+      void* entry_point_from_jni_;
+
+      // Method dispatch from quick compiled code invokes this ptr which may cause bridging into the interpreter.
+      void* entry_point_from_compiled_code;
+
+    } ptr_sized_fields_;
+ };
+
+------------- Desc: ------------------
+ArtMethod contains info the runtime execution/ compiler/JIT compiler needs.
+if method->dex_method_idx ==  DexFile::kDexNoIndex; means it is runtime method. not created from java.
+
+--------------------------------------------------------------------------------------------------------------
+
+4. FixupDexCaches with runtime_->GetResolutionMethod();
+ 
