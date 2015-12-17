@@ -465,6 +465,41 @@ QuickCompilerCallbacks() Desc:
 <src dex2oat/dex2oat.cc>
 
 1. Runtime::Create(std::move(runtime_options)) to create runtime with the option
+   * create a new runtime instance: instance_ = new Runtime;
+   * initialize the runtime:  instance_->Init();
+     
+     *** Memmap->Init();  mmaps_ = new MemMap if mmaps_ == nullptr,  dex2oat already init it. so nothing to do here.
+     
+     *** QuasiAtomic::Startup(); // just initalized the QuasiAtomic::gSwapMutexes vector, it has  kSwapMutexCount = 32 mutexs as elements.
+         gSwapMutexes->push_back(new Mutex("QuasiAtomic stripe", kSwapMutexesLock))
+     
+     *** oat_file_manager_ = new OatFileManager; //create OatFileManager, it will set have_non_pic_oat_file_(false)
+         **** OatFileManager is dealing all opeation of oatfile. the oatfile pointers returned from functions are always valid.
+             ---------------- Class OatFileManager --------------------------------
+             <src art/runtime/oat_file_manager.h >
+             class OatFileManager {
+               private: 
+                  std::set<std::unique_ptr<const OatFile>> oat_files_ GUARDED_BY(Locks::oat_file_manager_lock_);
+                  std::unordered_map<std::string, size_t> oat_file_count_ GUARDED_BY(Locks::oat_file_count_lock_);
+                  bool have_non_pic_oat_file_;
+             };
+             ------------------- Desc ---------------------------------------------
+             * oat_file_count_ is the pair of <oat_location, and reference count>, 
+             RegisterOatFileLocation will inc the ref count, 
+             UnRegisterOatFileLocation will dec the ref count. 
+             when ref count dec to 0, will delete from the oat_file_count_ map.
+             ======================================================================
+
+     *** Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold), runtime_options.GetOrDefault(Opt::HookIsSensitiveThread)); 
+         Using the runtime options to init monitor.
+         initialize the Monitor's  lock_profiling_threshold_ and  is_sensitive_thread_hook_ (all static)
+         No monitor instance generated.
+
+    *** Initialize parameters from runtime options: 
+       boot_class_path_string_;  class_path_string_ ; properties_ <seems not used>;  compiler_callbacks_ <for dex2oat, quickCallback>;
+       patchoat_executable_; must_relocate_; is_zygote; is_explicit_gc_disabled_; dex2oat_enabled_ <by default true>;  image_dex2oat_enabled_;
+        vfprintf_ ; exit_ ;  abort_;  default_stack_size_;  stack_trace_file_; compiler_executable_; compiler_options_; image_compiler_options_;
+        image_location_
 
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
@@ -513,9 +548,12 @@ QuickCompilerCallbacks() Desc:
         kFirstByteUnsafeRegister = 4;
         kNoRegister = -1;
 
-     2. CalleeSave Regs: kX86CalleeSaveRefSpills = EBP, ESI, EDI for "1" at bit mask.  
-        Args Regs: kX86CalleeSaveArgSpills = ECX, EDX, EBX for "1" at bit mask.
-        XMM: kX86CalleeSaveFpArgSpills = XMM0--XMM3
+     2. CalleeSave Regs:
+            kX86CalleeSaveRefSpills = EBP, ESI, EDI for "1" at bit mask.  
+        Args Regs: 
+            kX86CalleeSaveArgSpills = ECX, EDX, EBX for "1" at bit mask.
+        XMM: 
+            kX86CalleeSaveFpArgSpills = XMM0--XMM3
 
      3. QuickMethodFrameInfo( frame_size_in_bytes, core_spills, fp_spills) 
         * frame_size_in_bytes is calculated by:
@@ -539,8 +577,10 @@ QuickCompilerCallbacks() Desc:
         KNumberOfCpuRegisters = 16;
         kNoRegister = -1;
 
-     2. CalleeSave Regs: kX86_64CalleeSaveRefSpills = RBX, RBP, R12, R13, R14, R15 for "1" at bit mask.  
-        Args Regs: kX86_64CalleeSaveArgSpills = RSI, RDX, RCX, R8, R9 for "1" at bit mask.
+     2. CalleeSave Regs: 
+            kX86_64CalleeSaveRefSpills = RBX, RBP, R12, R13, R14, R15 for "1" at bit mask.  
+        Args Regs: 
+            kX86_64CalleeSaveArgSpills = RSI, RDX, RCX, R8, R9 for "1" at bit mask.
         XMM: 
             kX86_64CalleeSaveFpSpills = XMM12 -- XMM15
             kX86_64CalleeSaveFpArgSpills = XMM0 -- XMM7
