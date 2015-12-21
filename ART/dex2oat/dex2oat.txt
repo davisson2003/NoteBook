@@ -499,8 +499,179 @@ QuickCompilerCallbacks() Desc:
        boot_class_path_string_;  class_path_string_ ; properties_ <seems not used>;  compiler_callbacks_ <for dex2oat, quickCallback>;
        patchoat_executable_; must_relocate_; is_zygote; is_explicit_gc_disabled_; dex2oat_enabled_ <by default true>;  image_dex2oat_enabled_;
         vfprintf_ ; exit_ ;  abort_;  default_stack_size_;  stack_trace_file_; compiler_executable_; compiler_options_; image_compiler_options_;
-        image_location_
+        image_location_; max_spins_before_thin_lock_inflation_<50>;
 
+    *** Monitor_list_ = new MonitorList;
+       **** MonitorList 
+           --------------------- Class MonitorList ---------------------
+           <src art/runtime/monitor.h >
+           class MonitorList {
+             public: 
+              typedef std::list<Monitor*, TrackingAllocator<Monitor*, kAllocatorTagMonitorList>> Monitors;
+             private: 
+              // During the sweeping we may free an object and on a seperate thread have an object created
+              // using just freed memory. That object may then have it's lock word inflated and a monitor
+              // created.If we allow new monitor registration during sweeping this monitor may be 
+              // incorrectly freed as the object wasn't marked when sweep began.
+               bool allow_new_monitors_ GUARDED_BY(monitor_list_lock_); 
+               Mutex monitor_list_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+               ConditionVariable monitor_add_condition_ GUARDED_BY(monitor_list_lock_);
+               Monitors list_ GUARDED_BY(monitor_list_lock_);  
+           }
+          =================================================================
+
+    *** monitor_pool_ = MonitorPool::Create();
+       **** return new MonitorPool();
+           --------------------- Class MonitorPool ---------------------
+           <src art/runtime/monitor_pool.h >
+           class MonitorPool {
+             private: 
+                // TODO: There are assumptions in the code that monitor addresses are 8B aligned (>>3).
+                static constexpr size_t kMonitorAlignment = 8;
+                // Size of a monitor, rounded up to a multiple of alignment.
+                static constexpr size_t kAlignedMonitorSize = (sizeof(Monitor) + kMonitorAlignment - 1) &
+                                                              -kMonitorAlignment;
+                // As close to a page as we can get seems a good start.
+                static constexpr size_t kChunkCapacity = kPageSize / kAlignedMonitorSize;
+                // Chunk size that is referenced in the id. We can collapse this to the actually used storage
+                // in a chunk, i.e., kChunkCapacity * kAlignedMonitorSize, but this will mean proper divisions.
+                static constexpr size_t kChunkSize = kPageSize;
+                // The number of initial chunks storable in monitor_chunks_. The number is large enough to make
+                // resizing unlikely, but small enough to not waste too much memory.
+                static constexpr size_t kInitialChunkStorage = 8U;
+              
+                // List of memory chunks. Each chunk is kChunkSize.
+                Atomic<uintptr_t*> monitor_chunks_;
+                // Number of chunks stored.
+                size_t num_chunks_ GUARDED_BY(Locks::allocated_monitor_ids_lock_);
+                // Number of chunks storable.
+                size_t capacity_ GUARDED_BY(Locks::allocated_monitor_ids_lock_);
+              
+                // To avoid race issues when resizing, we keep all the previous arrays.
+                std::vector<uintptr_t*> old_chunk_arrays_ GUARDED_BY(Locks::allocated_monitor_ids_lock_);
+              
+                typedef TrackingAllocator<uint8_t, kAllocatorTagMonitorPool> Allocator;
+                Allocator allocator_;
+              
+                // Start of free list of monitors.
+                // Note: these point to the right memory regions, but do *not* denote initialized objects.
+                Monitor* first_free_ GUARDED_BY(Locks::allocated_monitor_ids_lock_);
+
+           }
+           =====================================================================================================
+
+     *** thread_list = new ThreadList;
+        **** ThreadList
+        ----------------- Class ThreadList ------------------------------------------
+        <src art/runtime/thread_list.h  >
+        class ThreadList {
+          
+          std::bitset<kMaxThreadId> allocated_ids_ GUARDED_BY(Locks::allocated_thread_ids_lock_);
+
+          // The actual list of all threads.
+          std::list<Thread*> list_ GUARDED_BY(Locks::thread_list_lock_);
+
+          // Ongoing suspend all requests, used to ensure threads added to list_ respect SuspendAll.
+          int suspend_all_count_ GUARDED_BY(Locks::thread_suspend_count_lock_);
+          int debug_suspend_all_count_ GUARDED_BY(Locks::thread_suspend_count_lock_);
+
+          // Number of threads unregistering, ~ThreadList blocks until this hits 0.
+          int unregistering_count_ GUARDED_BY(Locks::thread_list_lock_);
+
+          // Thread suspend time histogram. Only modified when all the threads are suspended, so guarding
+          // by mutator lock ensures no thread can read when another thread is modifying it.
+          Histogram<uint64_t> suspend_all_historam_ GUARDED_BY(Locks::mutator_lock_);
+
+          // Whether or not the current thread suspension is long.
+          bool long_suspend_;
+        }
+        ======================================================================================================
+
+     *** intern_table = new InternTable
+        **** InternTable
+        ------------------- Class InternTable--------------------------------------------------------------
+        <src art/runtime/intern_table.h>
+        /**
+         * Used to intern strings.
+         *
+         * There are actually two tables: one that holds strong references to its strings, and one that
+         * holds weak references. The former is used for string literals, for which there is an effective
+         * reference from the constant pool. The latter is used for strings interned at runtime via
+         * String.intern. Some code (XML parsers being a prime example) relies on being able to intern
+         * arbitrarily many strings for the duration of a parse without permanently increasing the memory
+         * footprint.
+         */
+        class InternTable {
+       
+           // Table which holds pre zygote and post zygote interned strings. There is one instance for
+           // weak interns and strong interns.
+           class Table {
+             private:
+               typedef HashSet<GcRoot<mirror::String>, GcRootEmptyFn, StringHashEquals, StringHashEquals,
+                   TrackingAllocator<GcRoot<mirror::String>, kAllocatorTagInternTable>> UnorderedSet;
+           
+               // We call SwapPostZygoteWithPreZygote when we create the zygote to reduce private dirty pages
+               // caused by modifying the zygote intern table hash table. The pre zygote table are the
+               // interned strings which were interned before we created the zygote space. Post zygote is self
+               // explanatory.
+               UnorderedSet pre_zygote_table_;
+               UnorderedSet post_zygote_table_;
+          }; // Table
+          
+            bool image_added_to_intern_table_ GUARDED_BY(Locks::intern_table_lock_);
+            bool log_new_roots_ GUARDED_BY(Locks::intern_table_lock_);
+            ConditionVariable weak_intern_condition_ GUARDED_BY(Locks::intern_table_lock_);
+            // Since this contains (strong) roots, they need a read barrier to
+            // enable concurrent intern table (strong) root scan. Do not
+            // directly access the strings in it. Use functions that contain
+            // read barriers.
+            Table strong_interns_ GUARDED_BY(Locks::intern_table_lock_);
+            std::vector<GcRoot<mirror::String>> new_strong_intern_roots_
+                GUARDED_BY(Locks::intern_table_lock_);
+            // Since this contains (weak) roots, they need a read barrier. Do
+            // not directly access the strings in it. Use functions that contain
+            // read barriers.
+            Table weak_interns_ GUARDED_BY(Locks::intern_table_lock_);
+            // Weak root state, used for concurrent system weak processing and more.
+            gc::WeakRootState weak_root_state_ GUARDED_BY(Locks::intern_table_lock_);
+
+        }; // InternTable
+
+   *** Init RuntimeOptions.
+   
+   *** Create Heap ---> new Heap()
+   
+   *** Configure JDWP options using ""-Xrunjdwp:_", "-agentlib:jdwp=_""
+     **** Dbg::ConfigureJdwp(runtime_options.GetOrDefault(Opt::JdwpOptions));
+     **** Init Dbg::  gJdwpOptions = jdwp_options; and gJdwpConfigured = true;
+
+   *** set JIT options
+   
+   ***  lambda_box_table_ = MakeUnique<lambda::BoxTable>();
+     **** // Allocate a global table of boxed lambda objects <-> closures. 
+
+   *** Arena pool
+     **** // Use MemMap arena pool for jit, malloc otherwise. 
+     **** Malloc arenas are faster to allocate but can not be trim easily. 
+     **** doesn't allocate any memory block.
+         const bool use_malloc = IsAotCompiler();  
+         arena_pool_.reset(new ArenaPool(use_malloc, false));
+         if (IsAotCompiler() && Is64BitInstructionSet(kRuntimeISA)) { 
+            low_4gb_arena_pool_.reset(new ArenaPool(false, true));
+         } 
+         linear_alloc_.reset(CreateLinearAlloc());  // new linera alloc based on the arena_pool or low4g_pool.
+
+  *** BlockSignals() 
+     **** blocks SIGPIPE, SIGQUIT, SIGUSR1
+
+  *** InitPlatformSignalHandlers() 
+     **** register signalhandler for different platform (android/linux)i
+
+  *** fault handler for valgrind. see (https://android-review.googlesource.com/#/c/107232/)
+
+  *** 
+
+  
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
   * initialize Runtime::callee_save_method_frame_infos_[i] to XXXCalleeSaveMethodFrameInfo(type), which actually create QuickMethodFrameInfo.
