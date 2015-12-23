@@ -668,8 +668,22 @@ QuickCompilerCallbacks() Desc:
      **** register signalhandler for different platform (android/linux)i
 
   *** fault handler for valgrind. see (https://android-review.googlesource.com/#/c/107232/)
+     **** it will init FaultHandler, 
+     **** and register to faulthandler: <src runtime/arch/x86/fault_handler_x86.cc >
+        ***** SuspensionHandler() if implicit_suspend_checks_ is true (false by default.)
+             ** add to fault_handler's generated_code_hander
+             ** Action() is for [generated code/other] check suspend by check thread's suspend_trigger.
+        ***** StackOverflowHandler() if implicit_so_checks_ is true. (true by default for dex2oat, false for runtime.) 
+             ** add to fault_handler's generated_code_hander
+             ** Action() is for check stack over flow by "test eax, [esp+ -xxx]" where xxx is overflow area.
+        ***** NullPointerHandler() if implicit_null_check is true; (true by default)
+             ** add to fault_handler's generated_code_hander 
+             ** Action() will set EIP to "uc->CTX_EIP = reinterpret_cast<uintptr_t>(EXT_SYM(art_quick_throw_null_pointer_exception));"
+        *****  JavaStackTraceHandler () if kEnableJavaStackTraceHandler (fault by default)
+             ** add to other_handler only
+             ** the Action() if in generated code, will dump the java stack.
 
-  *** 
+  ***  java_vm_ = new JavaVMExt(this, runtime_options);
 
   
 2. runtime_->SetInstructionSet(instruction_set_) 
