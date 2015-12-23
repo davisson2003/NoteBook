@@ -668,10 +668,145 @@ QuickCompilerCallbacks() Desc:
      **** register signalhandler for different platform (android/linux)i
 
   *** fault handler for valgrind. see (https://android-review.googlesource.com/#/c/107232/)
+     **** it will init FaultHandler, 
+     **** and register to fault handler: <src runtime/arch/x86/fault_handler_x86.cc >
+        ***** SuspensionHandler() if implicit_suspend_checks_ is true (false by default.)
+             ** add to fault_handler's generated_code_hander
+             ** Action() is for [generated code/other] check suspend by check thread's suspend_trigger.
+        ***** StackOverflowHandler() if implicit_so_checks_ is true. (true by default for dex2oat, false for runtime.) 
+             ** add to fault_handler's generated_code_hander
+             ** Action() is for check stack over flow by "test eax, [esp+ -xxx]" where xxx is overflow area.
+        ***** NullPointerHandler() if implicit_null_check is true; (true by default)
+             ** add to fault_handler's generated_code_hander 
+             ** Action() will set EIP to "uc->CTX_EIP = reinterpret_cast<uintptr_t>(EXT_SYM(art_quick_throw_null_pointer_exception));"
+        *****  JavaStackTraceHandler () if kEnableJavaStackTraceHandler (fault by default)
+             ** add to other_handler only
+             ** the Action() if in generated code, will dump the java stack.
 
-  *** 
+  ***  java_vm_ = new JavaVMExt(this, runtime_options);
+     **** ---------------------- JavaVMExt ---------------------
+          <src art/runtime/java_vm_ext.h>
+          class JavaVMExt : public JavaVM {
+            private: 
 
-  
+              Runtime* const runtime;
+              
+              // Used for testing. By default, we'll LOG(FATAL) the reason.
+              void (*check_jni_abort_hook_)(void* data, const std::string& reason);
+              void* check_jni_abort_hook_data_;
+
+              // Extra Checking.
+              bool check_jni;
+              // for fast jni??
+              bool force_copy;
+              const bool tracing_enabled_;       
+
+              // Extra diagnostics
+               const std::string trace_; 
+
+              // **** JNI Global References;
+              ReaderWriterMutex globals_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER; 
+
+              // Not guarded by globals_lock since we sometimes use SynchronizedGet in Thread:::DecodeJObject.  
+              IndirectReferenceTable globals_;
+
+              // No lock annotation since UnloadNativeLibraries is called on libraries_ but locks the jni_libraries_lock_ internally.
+              std::unique_ptr<Libraries> libraries_;
+
+               // Used by -Xcheck:jni.                             
+               const JNIInvokeInterface* const unchecked_functions_;
+
+               // **** JNI Weak References;
+               Mutex weak_globals_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER; 
+
+               // Since weak_globals_ contain weak roots, be careful not to 
+               // directly access the object references in it. Use Get() with the 
+               // Not guarded by weak_globals_lock since we may use SynchronizedGet in DecodeWeakGlobal.
+                IndirectReferenceTable weak_globals_;  
+                Atomic<bool> allow_accessing_weak_globals_; 
+
+                ConditionVariable weak_globals_add_condition_ GUARDED_BY(weak_globals_lock_);
+              };
+          ---------------------- DESC:  ----------------------
+          jvm at runtime side. contains runtime, global/weak global references.
+          =====================================================
+
+     **** ---------------------- JavaVM -----------------------
+         <src libnativehelper/include/nativehelper/jni.h>
+         class JavaVM {
+            const struct JNIInvokeInterface* functions; 
+         };
+         ------------------------DESC:-------------------------
+         It contains JNIInvokeInterface* for jni. represent the JVM to native.
+         -----------------------------------------------------
+
+     **** --------------------- JNIInvokeInterface ------------
+        <src libnativehelper/include/nativehelper/jni.h >
+         struct JNIInvokeInterface { 
+            void*       reserved0; 
+            void*       reserved1; 
+            void*       reserved2;
+
+           jint        (*DestroyJavaVM)(JavaVM*);
+           jint        (*AttachCurrentThread)(JavaVM*, JNIEnv**, void*)
+           jint        (*DetachCurrentThread)(JavaVM*);
+           jint        (*GetEnv)(JavaVM*, void**, jint);
+           jint        (*AttachCurrentThreadAsDaemon)(JavaVM*, JNIEnv**, void*);
+         };
+         ------------------------DESC:------------------------
+         Interface to JVM from jni
+         ==========================================================
+
+
+      *** Thread::Startup()
+        **** is_started_ = true;   
+        **** new the resume_cond_ (with holding thread_suspend_count_lock_)
+        **** call pthread_key_create, to create thread local data
+            key: Thread::pthread_key_self_, 
+            clean func: Thread::ThreadExitCallback()
+            intialized value is nullptr.
+
+      ***  Thread* self = Thread::Attach("main", false, nullptr, false); 
+          **** if runtime is shutting down, return nullptr
+          **** Runtime::Current()->StartThreadBirth(); //threads_being_born_++
+          **** create a Thread instance: self = new Thread(as_daemon);
+             ***** Internally it initialized: 
+                ***** wait_mutex, wait_cond_,
+                ***** tlsPtr.instrumentation_stack <queue of InstrumentationStackFrame>, which record this_object, method, return_pc, frame_id, interpret_entry_.
+                ***** tlsPtr.name = kThreadNameDuringStartup "<native thread without managed peer>"
+                ***** tlsPtr_.nested_signal_state =  static_cast<jmp_buf*>(malloc(sizeof(jmp_buf))); 
+                ***** tls32_.state_and_flags.as_struct.flags = 0;
+                ***** tls32_.state_and_flags.as_struct.state = kNative; // current state is Native.
+                ***** init tlsPtr_.held_mutexesp[] to 0;  memset(&tlsPtr_.held_mutexes[0], 0, sizeof(tlsPtr_.held_mutexes)); 
+                ***** fill tlsPtr_.rosalloc_runs( all KNumRosAllocThreadLocalSizeBrackets to dedicated_full_run_)
+                ***** checkpoint func[] to nullptr:  tlsPtr_.checkpoint_functions[i] = nullptr; [totally 3]
+                ***** suspend)barrier[] to nullptr:  tlsPtr_.active_suspend_barriers[i] = nullptr; [totally 3]
+                ***** flip func to nullptr: tlsPtr_.flip_function = nullptr;
+                ***** tlsPtr_.thread_local_mark_stack = nullptr;
+                ***** tls32_.suspended_at_suspend_check = false;
+
+         **** self->Init(runtime->GetThreadList(), runtime->GetJavaVM());
+             ***** tlsPtr_.pthread_self = pthread_self() // get thread id.
+             ***** SetUpAlternateSignalStack(); // nothing, bionic do it for us.
+             ***** InitStackHwm(); // Setup the stack based on data from kernel
+                ****** GetThreadStack(tlsPtr_.pthread_self, &read_stack_base, &read_stack_size, &read_guard_size)
+                       * Invoke  CHECK_PTHREAD_CALL(pthread_attr_getstack, (&attributes, stack_base, stack_size), __FUNCTION__); to get
+                       stack_base, stack_size.
+                       * Invoke CHECK_PTHREAD_CALL(pthread_attr_getguardsize, (&attributes, guard_size), __FUNCTION__); to get guardsize.
+                ****** tlsPtr.stack_begin = read_stack_base
+                ****** tlsPtr.stack_size = read_stack_size
+                ****** uint32_t min_stack = GetStackOverflowReservedBytes(kRuntimeISA) + kStackOverflowProtectedSize + 4*KB: 
+                       * overflow reserved bytes (8K), protected region size (4K), another page(4k)
+                ****** tlsPtr_.stack_end = tlsPtr_.stack_begin + GetStackOverflowReservedBytes(kRuntimeISA);
+                ****** if (implicit_stack_check)   
+                       *  tlsPtr_.stack_begin += read_guard_size + kStackOverflowProtectedSize; 
+                       *  tlsPtr_.stack_end += read_guard_size + kStackOverflowProtectedSize; 
+                       *  tlsPtr_.stack_size -= read_guard_size; 
+                       *  InstallImplicitProtection(); // protect the stackoverflow region (kStackOverflowProtectedSize from begin,)
+             ***** InitCpu()
+
+         **** Runtime::Current()->EndThreadBirth();  threads_being_born_--; and  shutdown_cond_->Broadcast(Thread::Current()); when runtime shutting down and thread_being born_ = 0;
+
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
   * initialize Runtime::callee_save_method_frame_infos_[i] to XXXCalleeSaveMethodFrameInfo(type), which actually create QuickMethodFrameInfo.
