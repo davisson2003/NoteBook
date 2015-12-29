@@ -669,7 +669,7 @@ QuickCompilerCallbacks() Desc:
 
   *** fault handler for valgrind. see (https://android-review.googlesource.com/#/c/107232/)
      **** it will init FaultHandler, 
-     **** and register to fault handler: <src runtime/arch/x86/fault_handler_x86.cc >
+     **** and regist to faulthandler: <src runtime/arch/x86/fault_handler_x86.cc >
         ***** SuspensionHandler() if implicit_suspend_checks_ is true (false by default.)
              ** add to fault_handler's generated_code_hander
              ** Action() is for [generated code/other] check suspend by check thread's suspend_trigger.
@@ -806,6 +806,8 @@ QuickCompilerCallbacks() Desc:
              ***** InitCpu()
 
          **** Runtime::Current()->EndThreadBirth();  threads_being_born_--; and  shutdown_cond_->Broadcast(Thread::Current()); when runtime shutting down and thread_being born_ = 0;
+
+=======
 
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
