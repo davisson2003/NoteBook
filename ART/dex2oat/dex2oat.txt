@@ -669,7 +669,7 @@ QuickCompilerCallbacks() Desc:
 
   *** fault handler for valgrind. see (https://android-review.googlesource.com/#/c/107232/)
      **** it will init FaultHandler, 
-     **** and register to fault handler: <src runtime/arch/x86/fault_handler_x86.cc >
+     **** and regist to faulthandler: <src runtime/arch/x86/fault_handler_x86.cc >
         ***** SuspensionHandler() if implicit_suspend_checks_ is true (false by default.)
              ** add to fault_handler's generated_code_hander
              ** Action() is for [generated code/other] check suspend by check thread's suspend_trigger.
@@ -803,9 +803,43 @@ QuickCompilerCallbacks() Desc:
                        *  tlsPtr_.stack_end += read_guard_size + kStackOverflowProtectedSize; 
                        *  tlsPtr_.stack_size -= read_guard_size; 
                        *  InstallImplicitProtection(); // protect the stackoverflow region (kStackOverflowProtectedSize from begin,)
-             ***** InitCpu()
+            ***** InitCpu()
+                ****** for x86_32, creat LDT, and set selector to fs. set fs as thread*
+                ****** for x86_64, set gs as thread*
+
+            ***** InitTlsEntryPoints()
+                ****** init all jni_entrypoints and quick_entrypoints to reinterpret_cast<uintptr_t>(UnimplementedEntryPoint); 
+                ****** InitEntryPoints(&tlsPtr_.jni_entrypoints, &tlsPtr_.quick_entrypoints); 
+                ****** init jpoints and qpoints: 
+                    ***** JNI : art-jni_dlsym_lookup_stub: 
+                    *****  SetQuickAllocEntryPoints_xxx():
+                    ***** others for qpoints: 
+                          // Cast
+                          // DexCahe , Field, Array 
+                          // JNI (qpoints->PJniMethodStart**)
+                          // Locks, 
+                          // Math
+                          // Intrisics, (memcpy, string_compareto)
+                          // Invocation,  qpoints->pQuickImtConflictTrampoline = art_quick_imt_conflict_trampoline; etc.
+                          // Thread:  qpoints->pTestSuspend = art_quick_test_suspend;   
+                          // Throws: qpoints->pDeliverException = art_quick_deliver_exception; (array_bounds, div_zero, no_such_method, null_ptr_exception, stack_overflow)
+                          // Deoptimize:
+                          // Read barrier:
+               ****** RemoveSuspendTrigger():  tlsPtr_.suspend_trigger = reinterpret_cast<uintptr_t*>(&tlsPtr_.suspend_trigger); 
+               ****** InitCardTable(): tlsPtr_.card_table = Runtime::Current()->GetHeap()->GetCardTable()->GetBiasedBegin();
+               ****** InitTid() :  tls32_.tid = ::art::GetTid();
+               ******  __get_tls()[TLS_SLOT_ART_THREAD_SELF] = this; 
+               ****** tls32_.thin_lock_thread_id = thread_list->AllocThreadId(this); // set internal thead id. start from 0. also set allocated_ids_[i]=i, tid is i+1.
+
+               ****** (if jni_env_ext <from parameter> != nullptr) tlsPtr_.jni_env = jni_env_ext; 
+               ****** else tlsPtr_.jni_env = JNIEnvExt::Create(this, java_vm);
+
+                          //
+                  
 
          **** Runtime::Current()->EndThreadBirth();  threads_being_born_--; and  shutdown_cond_->Broadcast(Thread::Current()); when runtime shutting down and thread_being born_ = 0;
+
+=======
 
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
