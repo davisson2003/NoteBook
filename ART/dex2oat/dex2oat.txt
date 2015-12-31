@@ -587,7 +587,7 @@ QuickCompilerCallbacks() Desc:
         }
         ======================================================================================================
 
-     *** intern_table = new InternTable
+     *** intern_table_ = new InternTable
         **** InternTable
         ------------------- Class InternTable--------------------------------------------------------------
         <src art/runtime/intern_table.h>
@@ -833,13 +833,138 @@ QuickCompilerCallbacks() Desc:
 
                ****** (if jni_env_ext <from parameter> != nullptr) tlsPtr_.jni_env = jni_env_ext; 
                ****** else tlsPtr_.jni_env = JNIEnvExt::Create(this, java_vm);
+                      ----------------------------- JNIEnvExt ------------------------------------------------------------------
+                      <src art/runtime/jni_env_ext.h >
+                      class JNIEnvExt : public JNIEnv {
+                         Thread* const self;
+                         JavaVMExt* const vm;
 
-                          //
-                  
+                         // Cookie used when using the local indirect reference table.  
+                         uint32_t local_ref_cookie;
+
+                         // JNI local references. 
+                         IndirectReferenceTable locals GUARDED_BY(Locks::mutator_lock_); 
+                         
+                         // Stack of cookies corresponding to PushLocalFrame/PopLocalFrame calls.
+                         std::vector<uint32_t> stacked_local_ref_cookies;
+
+                         // Frequently-accessed fields cached from JavaVM.
+                         bool check_jni;
+
+                         // How many nested "critical" JNI calls are we in?
+                         int critical;
+
+                         // Entered JNI monitors, for bulk exit on thread detach.
+                         ReferenceTable monitors;
+
+                         // Used by -Xcheck:jni. 
+                         const JNINativeInterface* unchecked_functions;
+                         
+                        private:
+
+                         // All locked objects, with the Java Caller stack frame that locked them. 
+                         // Used in CheckJNI to ensure that only monitors locked in this native frame are 
+                         // being unlocked, and that at the end all are unlocked.
+                         std::vector<std::pair<uintptr_t, jobject>> locked_objects_;
+
+                      }
+                      ----------------------------- JNIEnv --------------------------------------------------------------------
+                      <src libnativehelper/include/nativehelper/jni.h >
+                      class _JNIEnv {
+                        /* do not rename this; it does not seem to be entirely opaque */
+                        const struct JNINativeInterface* functions;
+                      }
+                      ========================================================================================================
+
+             ******  thread_list->Register(this);
 
          **** Runtime::Current()->EndThreadBirth();  threads_being_born_--; and  shutdown_cond_->Broadcast(Thread::Current()); when runtime shutting down and thread_being born_ = 0;
 
-=======
+         **** self -> >InitStringEntryPoints();
+             ***** init qpoints->pNewStringxxxx to soa.DecodeMethod(WellKnowClasses::xxx); // DecodeMethod(jmethodID mid) return reinterpret_cast<ArtMethod*>(mid);
+
+         ****  self->SetState(kNative);    
+
+         **** if(create_peer /*false by default*/) self->CreatePeer(thread_name, as_daemon, thread_group);
+             ***** On heap, create thread_name(env->NewStringUTF(name)),<added to env->locals> 
+             ***** On heap, create java_lang_Thread object , added to env->locals.
+             ***** set tlsPtr_.opeer =  soa.Decode<mirror::Object*>(peer.get())
+             ***** call the java_lang_Thread_init.
+             ***** set peer.get() 's nativePeer to self. 
+             ***** set peer thread name.
+             ***** InitPeer(), soa->DecodeField() for java_lang_Thread_daemon, java_lang_Thread_group, java_lang_Thread_name, java_lang_Thread_priority.
+                   and set these field in tlsPeer. 
+         **** else SetThreadName:  self->tlsPtr_.name->assign(thread_name);  ::art::SetThreadName(thread_name); 
+
+         **** soa(self) and Dbg::PostThreadStart(self);
+
+
+      ***  self->TransitionFromSuspendedToRunnable();  // Set us to runnable so tools using a runtime can allocate and GC by default
+
+      *** GetHeap()->EnableObjectValidation() , // by default, do nothing. this can verify heap here if turned on.
+
+      *** Generate class_linker_: class_linker_ = new ClassLinker(intern_table_);
+          --------------------------------- ClassLinker -------------------------------------------------------------
+          <src art/runtime/class_linker.h>
+          class ClassLinker {
+            private:
+
+              std::vector<const DexFile*> boot_class_path_;
+              std::vector<std::unique_ptr<const DexFile>> opened_dex_files_;
+              
+              mutable ReaderWriterMutex dex_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+              
+              std::list<DexCacheData> dex_caches_;
+              std::list<ClassLoaderData> class_loaders)_;
+
+              ClassTable boot_class_table_;   // records the classes and dex_files_ loaded by this loader.
+              std::vector<GcRoot<mirror::Class>> new_class_roots_ ; // used by CMS. 
+              // Do we need to search dex caches to find boot image classes?
+              bool dex_cache_boot_image_class_lookup_required_;
+              // Number of times we have searched teh dex caches for a class, after a certain number of misses,
+              // we move the classes into the class_table to avoid dex cache based searches.
+              Atomic<uint32_t> failed_dex_cache_class_lookups_;
+
+              GcRoot<mirror::ObjectArray<mirror::Class>> class_roots_;
+              // The interface table used by all arrays.
+              GcRoot<mirror::IfTable> array_iftable_;
+
+              // A cache of the last FindArrayClass results.
+              // avoid creating array class descriptors for the sake of performaning FindClass.
+              static constexpt size_t kFindArrayCacheSize = 16;
+              GcRoot<mirror::Class> find_array_class_cache_[kFindArrayCacheSize];
+              size_t find_array_class_cache_next_victim_;
+
+              bool init_done;
+              bool log_new_class_table_roots_; // used by CMS.
+              
+              InternTable* intern_table_;
+
+              // Trampolines within the image the bounce to runtime entrypoints. Done so that there is a single patch point
+              // within the image. 
+              const void* quick_resolution_trampoline_;
+              const void* quick_imt_conflict_trampoline_;
+              const void* quick_generic_jni_tampoline_;
+              const void* quick_to_interpreter_bridge_trampoline_;
+
+              // Image pointer size
+              size_t image_pointer_size_;
+
+          };
+         ------------Desc:---------------------
+         class linker contains a bunch of dexfiles in boot class path, and also opened dex files. 
+         it maintains the dex_caches which include the {jweak, dexfile* and resolved_types}
+         it also contains the class loader data which contains the {jweak, class_table and allocator}
+         it's boot_class_table_ {classes_, dex_files_} contains the dexfile object and classes loaded by this loader.
+         it also contains some caches which is used to speed up FindClass and class look up.
+         There are also array_iftable used for all arrays.
+         and InternTable* for intern string.
+         The image_pointer_size_ describes the pointer size of image. 
+         ---------------------------------------------------------------------------------------------------------------
+
+      *** 
+       
+==========================
 
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
