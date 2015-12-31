@@ -833,12 +833,62 @@ QuickCompilerCallbacks() Desc:
 
                ****** (if jni_env_ext <from parameter> != nullptr) tlsPtr_.jni_env = jni_env_ext; 
                ****** else tlsPtr_.jni_env = JNIEnvExt::Create(this, java_vm);
+                      ----------------------------- JNIEnvExt ------------------------------------------------------------------
+                      <src art/runtime/jni_env_ext.h >
+                      class JNIEnvExt : public JNIEnv {
+                         Thread* const self;
+                         JavaVMExt* const vm;
 
-                          //
-                  
+                         // Cookie used when using the local indirect reference table.  
+                         uint32_t local_ref_cookie;
+
+                         // JNI local references. 
+                         IndirectReferenceTable locals GUARDED_BY(Locks::mutator_lock_); 
+                         
+                         // Stack of cookies corresponding to PushLocalFrame/PopLocalFrame calls.
+                         std::vector<uint32_t> stacked_local_ref_cookies;
+
+                         // Frequently-accessed fields cached from JavaVM.
+                         bool check_jni;
+
+                         // How many nested "critical" JNI calls are we in?
+                         int critical;
+
+                         // Entered JNI monitors, for bulk exit on thread detach.
+                         ReferenceTable monitors;
+
+                         // Used by -Xcheck:jni. 
+                         const JNINativeInterface* unchecked_functions;
+                         
+                        private:
+
+                         // All locked objects, with the Java Caller stack frame that locked them. 
+                         // Used in CheckJNI to ensure that only monitors locked in this native frame are 
+                         // being unlocked, and that at the end all are unlocked.
+                         std::vector<std::pair<uintptr_t, jobject>> locked_objects_;
+
+                      }
+                      ----------------------------- JNIEnv --------------------------------------------------------------------
+                      <src libnativehelper/include/nativehelper/jni.h >
+                      class _JNIEnv {
+                        /* do not rename this; it does not seem to be entirely opaque */
+                        const struct JNINativeInterface* functions;
+                      }
+                      ========================================================================================================
+
+             ******  thread_list->Register(this);
 
          **** Runtime::Current()->EndThreadBirth();  threads_being_born_--; and  shutdown_cond_->Broadcast(Thread::Current()); when runtime shutting down and thread_being born_ = 0;
 
+         **** self -> >InitStringEntryPoints();
+
+         ****  self->SetState(kNative);    
+
+         **** if(create_peer /*false by default*/) self->CreatePeer(thread_name, as_daemon, thread_group); 
+         **** else SetThreadName:  self->tlsPtr_.name->assign(thread_name);  ::art::SetThreadName(thread_name); 
+
+
+      ***  self->TransitionFromSuspendedToRunnable();  // Set us to runnable so tools using a runtime can allocate and GC by default
 =======
 
 2. runtime_->SetInstructionSet(instruction_set_) 
