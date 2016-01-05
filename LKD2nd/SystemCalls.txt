@@ -1,0 +1,33 @@
+********************************** System Calls *****************************************
+
+* provides an abstracted hardware interface.
+* ensure system security and stablity.
+* allow for the virtualized system provided to processes.
+
+* asmlinkage in a function declaration tell compiler that args are all on stack.
+
+* System Call Number
+ ** Once assigned, never change. or it will cause app issue. 
+ ** "not implementated syscall" -> sys_ni_syscall(), do nothing except return -ENOSYS
+ ** stored in sys_call_table. defined in entry.S
+
+* mechanism is software interrupt.
+* interrupt handler is system call handler.
+* x86, the interrupt is "int 0x80" with eax set to syscall number.
+ ** trigger a switch to kernel mode and execute exception of vec 128.
+
+* Parameter passing:
+  ** less than 5 args: registers, ebx, ecx, edx, esi, edi
+  ** > 5 args: pointer to user-space storing the parameters -> one reg.
+
+
+* Steps in Binding a system call. p71-p74
+  1. add entry in system call table. usually in entry.S. (.long sys_foo)
+  2. add syscall number in asm/unistd.h (__NR_foo)
+  3. implement the sys_foo in related files under kernel/ like kernel/sys.c
+ 
+* User space call sys call.
+  # define __NR_foo 283 /* sys call number */
+  _syscall0(long, foo);  /* 0 means no args for sys_foo() */
+  call foo() in main(). 
+
