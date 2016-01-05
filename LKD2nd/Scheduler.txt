@@ -9,6 +9,110 @@
     *** timeslice: The time a process runs before it is preempted. and it is predetermined. gives each runnable process a slice of processor's time.
 =======================================================================================================================================================
 
-* O(1) scheduler. 
+* Process Priority (2 separate priority ranges)
+  ** nice value (-20 ~ 19) 
+  ** real-time priority (0 ~ 99)
+    *** configurable, default is 0 ~ 99
+    *** real-time processes are at higher priority than normal processes.
+
+* TimeSlice
+  ** Linux schedular offers a relatively high default timeslice.
+  ** dynamically determines the timeslice of a process based on priority.
+  ** process does not have to use all its timeslices at once.
+
+* Process Preemption:
+  ** when a process enter TASK_RUNNING, the kernel checks the priority with currently executing process,
+     if it is higher, the schedular is invoked to preempt the currently executing process and run the 
+     new one.
+  ** when a process's timeslice is zero, it is preempted. 
+
+* Runqueues <src kernel/sched.c>
+  ** runqueue is the list of runnable processes on a given processor.
+  ** one runqueue per processor, and one process only in one runqueue.
+  ** runqueue additionaly contains per-processor scheduling info.
+  -------------------------------------Runquque---------------------------------
+  struct runqueue {
+    spinlock_t lock;             /* spin lock that protects the runquque */
+    unsigned long nr_running;    /* number of runnable tasks */ 
+    unsigned long nr_switches;   /* context switch count */
+    unsigned long expired_timestamp;  /* time of last array swap */
+    unsigned long nr_uninterruptible; /* uninterruptible tasks */
+    unsigned long timestamp_last_tick;  /* last scheduler tick */
+    struct task_struct *curr    /* currently running task */
+    struct task_struct *idle;   /* this processor's idle task */
+    struct mm_struct *prev_mm   /* mm_struct of last ran task */
+    struct prio_array *active  /* active priority array */
+    struct prio_array *expired /* the expired priority array */
+    struct prio_array arrays[2] /* the actual prioroty arrays */
+    struct task_struct *migration_thread /* migration thread */
+    struct list_head * migration_queue /*migration queue*/
+    atomic_t   nr_iowait; /* number of tasks waiting on I/O */ 
+  };
+  -----------------------------------------------------------------------------------
+  ** cpu_rq(processor) return the runqueue of given processor.
+  ** task_rq_lock(task, &flags) and task_rq_unlock(rq, &flags) to lock/unlock before manipulate rq.
+  ** avoid deadlock, code want to lock multiple rqs needs always to obtain the locks in the same order: by ascending rq address.
+    *** if (rq1 < rq2) { spin_lock(&rq1->lock); spin_lock(&rq2->lock)}
+    *** double_rq_lock/unlock will do this inside.
+
+======================================================================================
+
+* The Priority Arrays
+  ** prio_array contains:
+    *** int nr_active: number of tasks in the queue.
+    *** unsigned long bitmap[BITMAP_SIZE] : bit map for which prio task list has elements. totaly 140 priorities so BITMAP_SIZE is 5 byte.
+    *** struct list_head queue[MAX_PRIO]:  queue for every priority.
+  ** see page 49 of the book.
+  ** schedule() find the high priority process in the bitmap and list, and preempt the current running process if necessory
+
+* Priority range:
+  ** Real time priority : 0 - 99
+  ** -20 -- +19 nice maped to 100- 139
+
+* sleeping and waking up.
+  ** sleeping in non-runnable state.
+  ** waiting for some event.
+  ** the task mart itself as sleeping, put itself in to wait queue, remove itself from run queue, call schedule().
+  ** wake up: set itself as runnable, remove from wait queue and put to run queue.
+  ** wait queue in kernel:  wake_queue_head_t.
+  ** DECLEAR_WAITQUEUE(wait, current); add_wait_queue(q, &wait); set_current_state(TASK_INTERRUPTABLE); ...schedule(); set_current_State(TASK_RUNNING); remove_wait_queue(q, &wait);
+
+* Load Balancer 
+  ** called by schedule when current runqueue is empty:
+   *** find any process and pulling it to this run queue (already empty)
+  ** or via timer, every 1 ms when system is idle. and 200ms otherwise.
+   *** find any imbalance between the runqueue to keep them about even.
+  ** called with current runqueue locked and interrupt disabled.
+  ** find_busiest_queue(), if not has at least 25% processes than current. return.
+  ** decide which priority array (expired array prefered) to pull.
+  ** find the highest priority list.
+  ** each task of given priority is analyzed, to find a task that: 1. not running, 2 not prevented to migrate. 3 not cache hot. pull to current runqueue.
+  ** repeat previous 2 steps until it is balance.
+
+* Preemption and Context Switching
+  ** context switching: switches from one runnable task to another.
+   *** calls switch_mm(): switch virtual memory mapping.
+   *** calls switch_to(): switch procssor state. like saving / restoring stack information and the register.
+  ** kernel provide need_resched flag to signify whether a reschdule is needed. 
+   *** flag is set when process run out of timeslice, set by scheduler_tick().
+   *** or set by try_to_wake_up() when a processor has higher priority than current.
+   *** kernel check the flag, call schedule() when it is set to switch to a new process.
+  ** Preemption is in schedule(). 
+  ** after 2.6, kernel is preemptive. only when kernel not holding a lock, it is preemptive.
+   *** preempty_count in thread_info. when lock, ++; when unlock, --. zero means kernel is preemptive. (also need need_resched is true)
+
+* Sheduler-Related System Calls:
+-------------------------------
+nice():   set process's nice value
+sched_setscheduler()  set process's scheduling policy
+sched_getscheduler()  gets process's scheduling policy (read the rt_poriority of task_struct)
+sched_setparam() 
+sched_getparam()      set/get the process's real-time priority. 
+sched_get_priority_max()/min() get the max /min real time priority for given scheduling policy
+
+sched_rr_get_inteval() get timeslice value.
+
+sched_set/getaffinity() set/get affinity (bitmask of which core/cores are avaiable)
+sched_yield() temporarily yields the processor to other waiting. it removing current process from active array and insert it in to the tail of expired array.
 
 

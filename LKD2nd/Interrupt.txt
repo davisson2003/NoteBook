@@ -1,0 +1,82 @@
+* interrupt is physically produced by electronic signals originating from 
+  hardware devices and directed into pins on an interrupt controller. 
+  The interrupt controller then send a signal to processor.
+  The processor receive the signal, and interrupts its current execution to
+  handle the interrupt.
+  The processor can then notify the operating system that an interrupt has
+  occurred and the operating system can handle the interrupt appropriately.
+
+* interrupt value -> IRQ line (interrupt request)
+
+* interrupt handler -> interrupt service routine (ISR)
+
+* top half / bottom half
+ ** top half: interrupt handler. work that is time critical.
+ ** bottom half: run in future. 
+
+* Registering an Interrupt Handler.
+ ** int request_irq(unsigned int irq, 
+                    irqreturn_t (*handler)(int, void*, struct pt_regs*),
+                    unsigned long irqflags,
+                    const char* devname,
+                    void* dev_id)
+ ** irqflags:
+   *** SA_INTERRUPT:  fast interrupt with all interrupt disabled.
+   *** SA_SAMPLE_RANDOM
+   *** SA_SHIRQ: the interrupt line can be shared among multiple interrupt 
+                 handlers, each handler registered on a given line must set
+                 this when sharing.
+
+ ** void* dev_id:
+   *** used primarily for shared interrupt lines.
+   *** when free interrupt handler, this provides a unique cookie to allow 
+       the removal of only the desired interrupt handler from the interrupt
+       line.
+
+ ** returns 0 if exit normally
+
+ ** request_irq() can sleep and therefore can not be called from interrupt
+    context or other situations where code can not block.
+
+* It is important to initialize hardware and register an interrupt handler in the proper order to prevent the interrupt handler from running before the device is fully initialized.
+
+* freeing an interrupt handler:
+  void free_irq(unsigned int irq, void *dev_id)
+
+* Interrupt context: 
+    one page interrupt stack.
+
+* Implementation of Interrupt handling. page 85. Figure 6.1
+
+* do_IRQ() calculate the interrupt value. 
+  then ackowledges the receipt of the interrupt and disables interrupt delivery on the line. 
+  then ensures a valid handler is on the line. then call handle_IRQ_event() to run the handler.
+
+* /proc/interrupts
+number　：　CPU0~4   interrupt controller    device name
+
+
+* Disable/Enbale interrupt:
+  local_irq_diable(); //only for current processor
+  local_irq_enable(); //only for current processor
+  // dangerous for embeded interrupt disable. for x86 calls cli and sti.
+  // save ones:
+  local_irq_save(flags); // disable interrupt and save state
+  local_irq_restore(flags)
+
+  // mask out the interrupt line；
+  disable_irq(unsigned int irq); // wait for current executing to complete and return. ensure the already executing handler exited.
+
+  disable_irq_sync(unsigned int irq);
+
+  enable_irq(unsigned int irq);
+
+  synchronize_irq(unsigned int irq); // waits for a specific interrupt handler to exit and then return.
+
+* Status of Interrupt System:
+ 
+  irq_disabled() return nonzero if the interrupt system on the local processor is disabled.
+  
+  in_interrupt() return nonzero if the kernel is in interrupt context. return zero means kernel is in process context.
+
+  in_irq() returns nonzero only if the kernel is specifically executing an interrupt handler.
