@@ -962,9 +962,234 @@ QuickCompilerCallbacks() Desc:
          The image_pointer_size_ describes the pointer size of image. 
          ---------------------------------------------------------------------------------------------------------------
 
-      *** 
+      *** if HasBootImageSpace() 
+         **** class_linker_->InitFromImage(&error_msg); // Init linker's field from image space.
+           ***** std::vector<gc::space::ImageSpace*> spaces = heap->GetBootImageSpaces();
+           ***** image_pointer_size_ = spaces[0]->GetImageHeader().GetPointerSize();
+           ***** dex_cache_boot_image_class_lookup_required_ = true;
+           ***** Register oat files in image spaces into OatFileManager's oat_files_ :
+                 std::vector<const OatFile*> oat_files = 
+                     runtime->GetOatFileManager().RegisterImageOatFiles(spaces); 
+                 // One oat file per space.
+           ***** OatHeader& default_oat_header = oat_file[0]->GetOatHeader();
+                 Check the default_oat_header.GetImageFileLocationOatDataBegin() and 
+                 default_oat_header.GetImageFileLocationOatChecksum() are all 0.
+           ***** oat_files[0]->GetOatHeader().GetStoreValueByKey(OatHeader::kImageLocationKey) should be 
+                 nullptr or *() should be 0
+           *****  quick_resolution_trampoline_ = default_oat_header.GetQuickResolutionTrampoline(); 
+           ***** quick_imt_conflict_trampoline_ = default_oat_header.GetQuickImtConflictTrampoline();
+           ***** quick_generic_jni_trampoline_ = default_oat_header.GetQuickGenericJniTrampoline();
+           ***** quick_to_interpreter_bridge_trampoline_ = default_oat_header.GetQuickToInterpreterBridge(); 
+           ***** if (kDebugBuild) Check all other images(oat_file[i]) use same trampoline as previous.
 
-====================================================================       
+           ***** StackHandleScopeCollection handles(self); 
+                  --------------------- StackHandleScopeCollection ------------------------------------
+                  <art/runtime/handle_scope.h>
+                  class StackHandleScopeCollection {
+                   private:
+                     static constexpr size_t kNumReferencesPerScope = 4;
+
+                     Thread* self_;
+
+                     std::stack<StackHandleScope<kNumReferencePerScope>*> scopes_;
+
+                     size_t current_scope_num_refs_;
+                  };
+                  -------------------- StackHandleScope ----------------------------------------------
+                  <art/runtime/handle_scope.h>
+                  class StackHandleScope : public HandleScope {
+                   private: 
+                     // Reference storage must be first as expected by the handlescope layout.
+                     StackReference<mirror::Object> storage_[kNumReferences];
+
+                     // The thread that the stack handle scope is linked list upon. The stack
+                     // handle scope will push and pop it self from this thread.
+                     Thread* const self_;
+
+                     // Posistion new handles will be created.
+                     size pos_;
+                  };
+                 --------------------- HandleScope ----------------------------------------------------
+                 <art/runtime/handle_scope.h>
+
+                 class HandleScope {
+                   private:
+                     // Link list of handle scopes. the root is held by Thread
+                     HandleScope* link_;
+
+                     // Number of handlerized references.
+                     const uint32_t number_of_references_;
+
+                     // Storage for reference.
+                     // StackReference<mirror::Object> references_[number_of_references_]; see StackHandleScope.
+                 }
+                 ========================================================================================
+
+           ***** std::vector<mirror::ObjectArray<mirror::DexCache>*> dex_caches_vector;  
+           ***** put all dexcaches for all image
+                  ( image_space->GetImageHeader().GetImageRoot(ImageHeader::kDexCaches); ) 
+                 in image_spaces into the dex_cache_vector. 
+                 //dex_caches is an object array in every image space.
+
+           ***** class_roots_ =  GcRoot<mirror::ObjectArray<mirror::Class>>(class_roots.Get());
+                 // Here class_roots is from spaces[0]->GetImageHeader()->GetImageRoot(ImageHeader::kClassRoots)
+                 // so the image's header contains different key for root, dexcache, etc.
+
+           ***** mirror::String::SetClass(GetClassRoot(kJavaLangString)); 
+                 // get the kJavaLangString from class_roots_ 
+
+           ***** set java_lang_object's object_size:
+                mirror::Class* java_lang_Object = GetClassRoot(kJavaLangObject);
+                 java_lang_Object->SetObjectSize(sizeof(mirror::Object));
+
+           ***** // set sentinel, an java lang object instance.
+                 // Allocate in non-movable so that it's possible to check if a JNI weak global ref has been
+                 // cleared without triggering the read barrier and unintentionally mark the sentinel alive.
+                 runtime->SetSentinel(heap->AllocNonMovableObject<true>(
+                        self, java_lang_Object, java_lang_Object->GetObjectSize(), VoidFunctor()));
+
+           ***** dex_file_count os the sum up of oat_file->GetOatHeader().GetDexFileCount()
+                 in oat_files in OatFileManager, (oat files from all image spaces.)
+
+           ***** dex_caches_count is the sum up of all dex_caches->length in dex_cache_vector.
+
+           ***** dex_file_count must equal to dex_caches_count. 
+
+           ***** for every dex_cache in all dex_caches in all images. 
+             ****** find the oat_file (image) that contains the dex_file_location of dex_cache.
+             ****** get the corresponding OatDexFile in oat_file with the dex_file_location and assign to 
+                    oat_dex_file.
+             ****** open the dex_file using oat_dex_file->OpenDexFile(); < get from the base in oatfile> 
+                ******* DexFile::Open(dex_file_pointer_/*base of dex in oatfile*/, FileSize(), dex_file_location_,
+                                      dex_file_location_checksum_, oat_dex_file* , error_msg);
+                ******* get from the baseptr(dex_file_pointer) in the oatfile.  
+             ****** check the dex location checksum of oat_dex_file and dex_file: 
+                    dex_file->GetLocationChecksum() != oat_dex_file->GetDexFileLocationChecksum()  
+             ****** AppendToBootClassPath(*dex_file.get(), dex_cache);
+                    1. boot_class_path_.push_back(&dex_file);
+                    2. RegisterDexFile(dex_file, dex_cache);
+                       * ClassLinker::RegisterDexFileLocked(const DexFile& dex_file, Handle<DexCache> dex_cache) 
+                        ** //Clean up pass to remove null dex caches.
+                           //Null dex caches can occur due to class unloading and we are lazily removing null entries. 
+                           find all dex_cache_data in linker->dex_caches_ <std::list<DexCacheData>>, 
+                           whose weak field (IndirectReference) in JavaVMExt's weak_globals_ contains obj == sentinel, it means cleared.
+                           delete the weak ref from weak_globals_.
+                           and erase the dex_cache_data from the linker->dex_caches_.
+                        
+                        ** jweak dex_cache_jweak = vm->AddWeakGlobalRef(self, dex_cache.Get());
+                           // add the dex_cache into the JavaVMExt's weak_globals_.
+                        ** dex_cache->SetDexFile(&dex_file); 
+                        
+                        **// build up the DexCacheData of the dex_cache and dex_file. 
+                          // and add to linker->dex_caches_.
+                          *** data.weak_root = dex_cache_jweak; 
+                          *** data.dex_file = dex_cache->GetDexFile(); 
+                          *** data.resolved_types = dex_cache->GetResolvedTypes(); 
+                          *** dex_caches_.push_back(data);   
+
+             ******  opened_dex_files_.push_back(std::move(dex_file))   
+
+           *****  if (!runtime->IsAotCompiler() && runtime->GetInstrumentation()->InterpretOnly())
+             ****** for all methods in all images. set the 
+                    method->SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(),ptr_size)                    (art_quick_to_interpret_bridge)
+             ****** How to get the methods:  ==>> image->header->methodsSection().
+                     const ImageHeader& header = space->GetImageHeader();   
+                     const ImageSection& methods = header.GetMethodsSection();
+
+           ***** // reinit class_roots_:
+                // Set the kJavaLangClass's class flags to KClassFlagClass, 
+                // and set the Class's java_lang_Class_ to GcRoot<Class>(kJavaLangClass);
+                // KJavaLangClass is from the image with class_roots.  
+                mirror::Class::SetClassClass(class_roots->Get(kJavaLangClass));
+                //
+                class_roots_ = GcRoot<mirror::ObjectArray<mirror::Class>>(class_roots.Get()); 
+
+           *****  // reinit array_iftable_ from any array class instance, they should be == 
+                array_iftable_ = GcRoot<mirror::IfTable>(GetClassRoot(kObjectArrayClass)->GetIfTable());
+
+           ***** // other root class initialzie:
+                 // String class root was set above
+                   // Reflect Field
+                   mirror::Field::SetClass(GetClassRoot(kJavaLangReflectField));
+                   mirror::Field::SetArrayClass(GetClassRoot(kJavaLangReflectFieldArrayClass));
+                   // Reflect Constructor
+                   mirror::Constructor::SetClass(GetClassRoot(kJavaLangReflectConstructor));
+                   mirror::Constructor::SetArrayClass(GetClassRoot(kJavaLangReflectConstructorArrayClass));
+                   // Reflect Method
+                   mirror::Method::SetClass(GetClassRoot(kJavaLangReflectMethod));
+                   mirror::Method::SetArrayClass(GetClassRoot(kJavaLangReflectMethodArrayClass));
+                   // Reflect Reference
+                   mirror::Reference::SetClass(GetClassRoot(kJavaLangRefReference));
+                   // Premitive Array
+                   mirror::BooleanArray::SetArrayClass(GetClassRoot(kBooleanArrayClass));
+                   mirror::ByteArray::SetArrayClass(GetClassRoot(kByteArrayClass));
+                   mirror::CharArray::SetArrayClass(GetClassRoot(kCharArrayClass));
+                   mirror::DoubleArray::SetArrayClass(GetClassRoot(kDoubleArrayClass));
+                   mirror::FloatArray::SetArrayClass(GetClassRoot(kFloatArrayClass));
+                   mirror::IntArray::SetArrayClass(GetClassRoot(kIntArrayClass));
+                   mirror::LongArray::SetArrayClass(GetClassRoot(kLongArrayClass));
+                   mirror::ShortArray::SetArrayClass(GetClassRoot(kShortArrayClass));
+                   // Throwable
+                   mirror::Throwable::SetClass(GetClassRoot(kJavaLangThrowable));
+                   // StackTraceElement
+                   mirror::StackTraceElement::SetClass(GetClassRoot(kJavaLangStackTraceElement));
+
+
+          ***** add all class table from image space's classtable section to linker->boot_calss_table_.classes.                
+                linker->boot_calss_table is instance of ClassTable. 
+                it's classes_ is std::vector<ClassSet>, 
+                ClassSet is 
+                HashSet<GcRoot<mirror::Class>, GcRootEmptyFn, ClassDescriptorHashEquals,
+                ClassDescriptorHashEquals, TrackingAllocator<GcRoot<mirror::Class>, kAllocatorTagClassTable>>
+            ****** class_table->ReadFromMemory(space->Begin() + section.Offset()); 
+                ====>> classes_.insert(classes_.begin(), ClassSet(ptr, /*make copy*/false, &read_count)); 
+
+          ***** if we have class table inserted in previous step.
+                dex_cache_boot_image_class_lookup_required_ = false; 
+
+
+          ***** FinishInit(self);
+             ****** get the java_lang_ref_Reference = GetClassRoot(kJavaLangRefReference); from the image's roots.
+             ****** find class  java_lang_ref_FinalizerReference = FindSystemClass(self, "Ljava/lang/ref/FinalizerReference;")
+             ****** check the field 0-3's name and typeDescriptor of java_lang_ref_Reference is legal. (pendingNext, queue, queueNext, freferent) 
+             ****** check the filed 2 of java_lang_ref_FinalizerReference is "zobie" and class desc is "Ljava/lang/Object;".
+
+             ****** check all roots in class_roots_ were initialized.
+
+             ****** check array_iftable_ is not null.
+
+             ****** disable the slow paths in FindClass and CreatePermitiveClass.
+                    init_done = true;
+
+         --------------------- InitFromImage is finished ---------------        
+         
+         **** fill boot_class_path_string_ if it is empty. filled with the dex_locations of dex_files in boot_class_path_ of linker. delimiter is ":"
+      
+      ---------------------- if HasBootImageSpace() finished ---------------
+  
+      *** if *NOT* HasBootImageSpace() 
+       **** InitWithoutImage(), init all the root classes by self.
+       **** FinishInit(self);
+       ****  SetCalleeSaveMethod(CreateCalleeSaveMethod(), type);
+
+     *** process some options for profiler.
+
+     *** Generate pre_allocated_OutOfMemoryError. by Throw-catch-clear approach
+         pre_allocated_OutOfMemoryError_ = GcRoot<mirror::Throwable>(self->GetException()); 
+    
+     *** Generate pre_allocated_NoClassDefFoundError_ . by Throw-catch-clear.
+          pre_allocated_NoClassDefFoundError_ = GcRoot<mirror::Throwable>(self->GetException())
+
+     *** Look for a native bridge.
+       **** std::string native_bridge_file_name = runtime_options.ReleaseOrDefault(Opt::NativeBridge);  
+       **** is_native_bridge_loaded_ = LoadNativeBridge(native_bridge_file_name);
+         ***** it calls android::LoadNativeBridge(native_bridge_library_filename.c_str(), &native_bridge_art_callbacks_) to initialize the &native_bridge_art_callbacks_. <3 interface in native_bridge_art_callbacks_:
+        GetMethodShorty, GetNativeMethodCount, GetNativeMethods>
+
+  ==================================== Runtime Init() finished!!====================
+
+
+=========================== 1. Runtime::Create() finished!!=========================================       
 
 2. runtime_->SetInstructionSet(instruction_set_) 
   * this set the instruction_set_ and 
