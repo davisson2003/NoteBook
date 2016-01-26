@@ -1366,4 +1366,19 @@ if method->dex_method_idx ==  DexFile::kDexNoIndex; means it is runtime method. 
 --------------------------------------------------------------------------------------------------------------
 
 4. FixupDexCaches with runtime_->GetResolutionMethod();
- 
+  * for every DexCacheData& data in dex_caches_;
+   ** get data's week_root and DecodeJObject(data.weak_root) to DexCache* dex_cache
+   ** set the dex_cache's every resolved_methods[i] to runtime_->GetResolutionMethod(). (dexcache->fixup())
+
+5.  interpreter::UnstartedRuntime::Initialize(); 
+   * InitializeInvokeHandlers();
+    ** insert UnstartedRuntime::Unstarted ## ShortName into UnstartedRuntime's invoke_handlers_;
+    ** see /runtime/interpreter/unstarted_runtime_list.h for ##ShortName (e.g. ClassForName, ClassForNameLong, some method in libcore. String related)
+
+   *  InitializeJNIHandlers();
+    ** insert  UnstartedRuntime::UnstartedJNI ## ShortName into UnstartedRuntime's jni_handlers_.
+
+6. runtime_->GetClassLinker()->RunRootClinits();
+  * Iterate ClassLinkers RootClass, and EnsureInitialized(the class), run <clinit>
+
+========================  CreateRuntime() finish!! =============================================================
