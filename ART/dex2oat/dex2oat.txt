@@ -1381,4 +1381,175 @@ if method->dex_method_idx ==  DexFile::kDexNoIndex; means it is runtime method. 
 6. runtime_->GetClassLinker()->RunRootClinits();
   * Iterate ClassLinkers RootClass, and EnsureInitialized(the class), run <clinit>
 
+7. self->TransitionFromRunnableToSuspended(kNative); 
 ========================  CreateRuntime() finish!! =============================================================
+
+======================= Back to Setup() ======================================================================
+* if !IsBootImage() 
+**  get oat_checksum, oat_data_begin, and image_patch_delta_ from image_spaces[0].
+**  get image_file_location = <element in image_space[]> and put it into key_value_store_, with key = KImageLocationKey.
+**  get opened dex file in class path. and put in to key_value_store_, with key == kClassPathKey.
+
+* write key_value_store_ and dex file to oat file. and put opened dex files into  dex_files_per_oat_file_;
+* dex_file_oat_filename_map_.emplace(dex_file.get(), oat_filenames_[i]
+* dex_files_ = MakeNonOwningPointerVector(opened_dex_files_);  
+
+* if IsBootImage(), just CreateRuntime(std::move(runtime_options))
+
+* WellKnownClasses::Init(self->GetJniEnv()); 
+   ** Use CacheClass, CacheMethod(ret mid), cachefield(ret fid), etc. to initialize WellKnowClasses.
+   **  Thread::Current()->InitStringEntryPoints(); 
+       e.g.  qpoints->pNewEmptyString =  soa.DecodeMethod(WellKnownClasses::java_lang_StringFactory_newEmptyString)
+
+* if !IsBootImage()
+ ** create class_loader_ =  class_linker->CreatePathClassLoader(self, class_path_files);
+
+* if !IsBootImage() and is KQuick, and num_methods < threshold, using kSpeed.
+================== Setup() finish!===============================================================================
+
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
+
+===============================================---===============================================================
+=================== CompileImage() && CompileApp() ==============================================================
+=================================================================================================================
+* dex2oat.Compile() 
+  ** calculate the compiler_options_->no_inline_files.
+  ** generate compiler driver.
+     driver_.reset(new CompilerDriver(compiler_options_.get(),
+                                      verification_results_.get(),
+                                      &method_inliner_map_,
+                                      compiler_kind_,
+                                      instruction_set_,
+                                      instruction_set_features_.get(),
+                                      IsBootImage(), 
+                                      image_classes_.release(),
+                                      compiled_classes_.release(),
+                                      nullptr,
+                                      thread_count_,
+                                      dump_stats_,
+                                      dump_passes_,
+                                      compiler_phases_timings_.get(),
+                                      swap_fd_,
+                                      &dex_file_oat_filename_map_,
+                                      profile_compilation_info_.get()));
+ ** driver->SetDexFilesForOatFile(dex_files_);
+ ** driver->CompileAll(class_loader_, dex_files_, timings_);
+ ** ============== CompilerDriver::CompileAll() ==========================================
+   *** InitializeThreadPools();
+   *** Precompile(class_loader, dex_files, timings); 
+       Precompile:
+       1) Load image classes.
+          LoadImageClasses(timings);
+          **** iterate class in image_classes_, get descriptor and call class_linker->FindSystemClass(self, descriptor.c_str())
+           ***** call FindClass with loader = nullptr.
+                 a) FindPrimitiveClass(): For Primitive, return class in linker.class_roots_.
+                 b) LookupClass(): Find class in the linker's loaded class_table (which corrospend to the specific loader)
+                 c) CreateArrayClass() : resolve array class if desc[0] == '['
+                 d) if loader == nullptr, 
+                     FindInClassPath(): find the <dex_file,class_def> in the dex file of boot_class_path.
+                     if class def is found, 
+     << DefineClass >> @ DefineClass(): Alloc class object, RegisterDexFile(loader, dexfile) to generate dex_cache and insert to dex_caches.
+                          set class's dex_cache, adn SetupClass() to setup class_ to kJavaLangClass, assess_flag from dexfile, class_loader, 
+                          DexClassDefIndex, DexTypeIndex from dexfile, SetStatus to kStatusIdx.
+                 
+                        @@ MonitorEnter the class.
+                        @@ klass->SetClinitThreadId(self).
+                        @@ InsertClass() into class table, if already inserted, return EnsureResolved().
+                        @@ LoadClass(); if insertClass() success with (not inserted before): LoadClass()
+                           Load Fields and Methods:
+                           GetClassData from dex_file => class_data.
+                           LoadClassMembers(self, dex_file, class_data, klass, oat_calss):
+                                                                                      load fields (index, flag, declaring class) into ifields/sfields. and set them to
+                                                                                      class->SetSFieldsPtr(sfields), class->SetInstanceFields(ifields).
+                                                                                      load methods(dex_method_idx, declaring class, codeitem offset, 
+                                                                                          DexCacheResolvedMethods, ResolvedTypes, access flag, finalizable, 
+                                                                                          kAccessConstructor) and link code (
+                                                                                            EntrypointsFromQuickCompiledCode from oat_file,
+                                                                                            
+                                                                                            for static and not constructor, install trampoline, will replace by 
+                                                                                            entrypoints when class initialize.
+                                                                                                  method->SetEntryPointFromQuickCompiledCode(GetQuickResolutionStub());
+                                                                                               
+                                                                                            if need interpretor, 
+                                                                                               for !native, 
+                                                                                                method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge())
+                                                                                               for native
+                                                                                                  method->SetEntryPointFromQuickCompiledCode(GetQuickGenericJniStub()); 
+                                                                                            if native: method->UnregisterNative() to restores dlsymLookup stub. that is
+                                                                                              set SetEntryPointFromJni to art_jni_dlsym_lookup_stub
+                                                                                           )
+
+                     @@ LoadSuperAndInterfaces(klass, dex_file): Resolve the super and interface type. setSuperClass() and set statue to kStatusLoaded.
+                     @@ LinkClass(self, descriptor, klass, interfaces, h_new_calss_out);
+                        @@@ LinkSuperClass(klass); // Verify that klass should have super and set finalizable, classloaderclass, classflags inherit from super.
+                        @@@ ArtMethod* imt[IMT_SIZE] fill with Runtime::imt_unimplemented_method, 
+                              it only has trampoline(art_quick_imt_conflict_trampoline) jmp to artInvokeInterfaceTrampoline 
+                        @@@ LinkMethods(self, klass, interfaces, imt)
+                            @@@@  std::unordered_map<size_t, ClassLinker::MethodTranslation> default_translations:  a map from vtable indexes to the method they need
+                                  to be updated to point to. Used because we need to have default methods be in the virtuals array of each class but we don't set that
+                                  up until LinkInterfaceMethods.
+                            @@@@  SetupInterfaceLookupTable(self, klass, interfaces) add super's iftable, direct interface's iftable or specified interface's iftable
+                                  to class's iftable.
+                                  ******* so class's iftable contains super's and itself iftable. dup are eliminated ********
+                            @@@@  LinkVirtualMethods(self, kalss, default_translations): 
+                                1) if class is interface, it has no vtable. set method index of method in the class method array. 
+                                   and if method is not abstract, set method flag to kAccDefault, set class to HasDefaultMethods.
+                                2) if class is not interface:
+                                  2.1) if num_virtual_methods == 0 and super->iftablecount == class->iftablecount
+                                      klass->SetVTable(super_vtable); // reuse super_vtable.
+                                  2.2) else
+                                      vtable first copy from super_vtable
+                                      // generate vtable, if method is overwrite, then replace the item copied from  super_vtable.
+                                      if not overwrite, just append it. and if there is conflict, record it <index, conflict>into default_translations. 
+                                      (translation: 
+                                       1. no translation, 
+                                       2. different default method <CreateTranslatedMthod>; 
+                                       3. same default method defined in different interfaces.<CreateConflictingMethod>; 
+                                       4. The method must be replaced with an abstract miranda method. super implements an interface with default method, 
+                                          but this implemented subinterface from super's one and declare the same default method as abstract.)
+                           
+                                     
+                             @@@@  LinkInterfaceMethods(self, klass, default_translations, out_imt);
+                             // IMTable[kImtSize] (implemented table, global for all interfaces), contains the implemented interface method.
+                             // iftable->MethodArray(i) contains implemented methods for the corresponding interface.
+                                  1) FillImtFromSuperClass():
+                                    1.1) if super has imtable:
+                                       find super's implementated interface method in 
+                                     super's imtable. and fill it in out_imt[idx].
+                                    1.2) if super not have imtable:
+                                       iterate the iftable of super, and find implemented method in 
+                                       methodArray, set method to out_imt[idx] if the entry is 
+                                       unimplemented_method. else there is confilct, out_imt[idx] =
+                                       imt_conflict_method; 
+                                       (idx is calculated by: 
+                                        interface->GetVirtualMethod(j, pointer_size);) 
+                                        ->GetDexMethodIndex() % mirror::Class::kImtSize;
+                                  2) class -> iftable MethodArray, 
+                                     clone from super's for interfaces from super;
+                                     new num_method for direct interfaces.
+                                  3) 
+
+
+
+       2) Resolve all classes.
+          
+       3) Attempt to verify all classes.
+          
+       4) Attempt to initialize image classes, and trivially initialized classes.
+
+
+   *** Compile(class_loader, dex_files, timings);
+
+   *** FreeThreadPools();
+
+*  ====================== dex2oat.Compile() finish!! ===========
+
+
