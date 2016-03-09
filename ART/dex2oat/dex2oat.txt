@@ -1569,19 +1569,74 @@ if method->dex_method_idx ==  DexFile::kDexNoIndex; means it is runtime method. 
 
                                only fileds directly declared by this class are in ifields.
 
+                       @@@ CreateReferenceInstanceOffsets(klass)
+                          @@@@ calculate the instancefields offset, the obj layout is: 
+                               # super_->GetObjectSize() # header# ifields# if offset is > 32, then fill 
+                               with  mirror::Class::kClassWalkSuper.
+                          @@@@ setField32(OFFSET_OF_OBJECT_MEMBER(Class, reference_instance_offsets_), off)
+                       @@@ if !klass->IsTemp() || (!init_done_ && klass->GetClassSize() == class_size)
+                          @@@@ klass->PopulateEmbeddedImtAndVTable(imt, image_pointer_size_).
+                               This is copy imt into klass, and then fill vtable entry, copied from vtable_.
+                               layout: sizeof(CLASS) ## VTABLE LENGTH## IMT##VTABLE ENTRY##
+                          @@@@ setklass vtable_ to nullptr (except java.lang.object)
+                          @@@@  mirror::Class::SetStatus(klass, mirror::Class::kStatusResolved, self); 
+                      @@@ else
+                          @@@@ make new class copy from the class (temp class), 
+                               update class in class table, update fields/methods declare class.
+                               mirror::Class::SetStatus(klass, mirror::Class::kStatusResolved, self);
 
+               ===========================  @@ LinkClass Finished !!! ==========================
+                    @@ if Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled()
+                       @@@ means method stubs has been changed, need to update again.
+                       @@@ Runtime::Current()->GetInstrumentation()->InstallStubsForClass(h_new_class.Get())
+                    
+                    @@ Dbg::PostClassPrepare(h_new_class.Get()); 
+                       // send CLASS_PREPARE events to the debugger from here
 
-       2) Resolve all classes.
+                    @@  jit::Jit::NewTypeLoadedIfUsingJit(h_new_class.Get());
+                      // Notify native debugger of the new clas and its layout.
+
+                    @@ return h_new_class.Get()
+
+               ===========================  @ DefineClass finished ==============================
+           
+                 e) if loader != nullptr, 
+                    @ if IsBootClassLoader(class_loader),  FindInClassPath() and DefineClass.
+                    @ else FindInClassPathClassLoader(loader->super())// find use super loader
+                            and get dexfile from the PathClassLoader's DexPathList's array dexElements[]
+                            and get class def from dexfile. then DefineClass()
+                 f) using java's classloader's load class to load class.
+              
+            ============  FindClass() Finished!!!! ====================================
+
+            // Resolve the exceptions referenced by the loaded classes.
+            // insert all classes into the image_calsses.
+      ================== LoadImageClasses() Finished!!! ======================
+ 
+       2) if (never_verify || verification_enabled) Resolve all classes in dex_files.
+           Resolve(class_loader, dex_files, timings);  and resolve method and fields inside.
+           resolved method and field are save in dexcache. 
+           resolve use  klass->FindInterface/Direct/VirtualMethod() to resolve method.
           
-       3) Attempt to verify all classes.
+       3) if (never_verify) SetVerified(class_loader, dex_files, timings);
+          then if (!verification_enabled) return;
+          else Attempt to verify all classes.
+          
+          @ Verify(class_loader, dex_files, timings);  
           
        4) Attempt to initialize image classes, and trivially initialized classes.
+          @  InitializeClasses(class_loader, dex_files, timings);
+          @  UpdateImageClasses(timings);
+
+   ***====================Precompile() finished!!! =============================
 
 
-   *** Compile(class_loader, dex_files, timings);
+   *** CompilerDriver->Compile(class_loader, dex_files, timings);
 
    *** FreeThreadPools();
 
-*  ====================== dex2oat.Compile() finish!! ===========
+  **  ====================== compileAll() finish!! ============================
+
+* =========================dex2oat.compile() finish !! ========================
 
 
