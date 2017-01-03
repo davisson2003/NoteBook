@@ -81,8 +81,6 @@ number　：　CPU0~4   interrupt controller    device name
 
   in_irq() returns nonzero only if the kernel is specifically executing an interrupt handler.
 
-============================================================================
-
 * Bottom Halves
  ** perform any interrupt related work not performanced by the interrupt handler.
  ** almost all works because we want interrupt handler (top halve) to perform as little work as possible.
